@@ -57,16 +57,17 @@ stays in PCM_RAG. `cleanup_leftovers.ps1`, `delete_dup_stub.ps1` and
 
 ## Adding a machine
 
-Exactly two facts are per-machine. Everything else derives.
+Three facts are per-machine. Everything else derives.
 
 1. `git clone` this kit.
 2. `.\bootstrap.ps1` — verifies Python 3.13.x, creates or reuses a venv,
    installs `requirements.txt`, decides CUDA via `torch.cuda.is_available()`
-   (not `nvidia-smi`), writes **`machine.ps1`** (`$VENV`, `$HasCUDA`), installs
+   (not `nvidia-smi`), writes **`machine.ps1`** (`$VENV`, `$HasCUDA`, `$DRIVE`), installs
    the skills into `~\.claude\skills`, seeds the tiktoken cache, and checks
    Docker and the wav files.
-   Use `-Venv <path>` to reuse an existing venv, `-Dev` to junction the skills
-   instead of copying them.
+   Use `-Venv <path>` to reuse an existing venv, `-Drive <path>` to set the
+   Drive snapshot root explicitly (otherwise the mounted drive letters are
+   probed), `-Dev` to junction the skills instead of copying them.
 3. Set **`RAGKIT_HOME`** to the clone, then restart every shell and every
    running Claude session.
 4. Copy each base's `lightrag\.env` by hand. Those files hold API keys, are

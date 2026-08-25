@@ -23,7 +23,7 @@ if (-not $Project) { throw "COMPOSE_PROJECT_NAME is missing from $EnvF - without
 $Container = (docker compose --project-directory $LrDir ps -a --format json | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
 $Kit       = $env:RAGKIT_HOME
 if (-not $Kit) { throw "RAGKIT_HOME is not set - run ragkit\bootstrap.ps1, then restart this session" }
-. (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA
+. (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA, $DRIVE
 $Py = Join-Path $VENV 'python.exe'
 ```
 

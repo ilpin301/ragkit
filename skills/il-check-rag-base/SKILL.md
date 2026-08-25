@@ -34,7 +34,7 @@ if (-not $Project) { throw "COMPOSE_PROJECT_NAME is missing from $EnvF - without
 $Container = (docker compose --project-directory $LrDir ps -a --format json | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
 $Kit       = $env:RAGKIT_HOME
 if (-not $Kit) { throw "RAGKIT_HOME is not set - run ragkit\bootstrap.ps1, then restart this session" }
-. (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA
+. (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA, $DRIVE
 $Py = Join-Path $VENV 'python.exe'
 ```
 
@@ -48,7 +48,8 @@ Two more values this skill needs, also derived:
 
 ```powershell
 $BaseName = Split-Path $Root -Leaf
-$Snapshot = "J:\My Drive\RAG\$BaseName\rag_storage.tgz"   # J: is the streaming Drive mount, not G:/H:
+if (-not $DRIVE) { throw "machine.ps1 has no `$DRIVE - Google Drive is not mounted here; re-run bootstrap.ps1 -Force" }
+$Snapshot = Join-Path $DRIVE "$BaseName\rag_storage.tgz"   # the drive letter is a per-machine fact
 ```
 
 ## Step 0 — preflight (READ THIS, two views of the truth disagree)
@@ -116,7 +117,7 @@ one invariant, is told **read-only, propose nothing, fix nothing**, and returns 
   per-doc chunk counts. Report docs present in the backup but missing live (possible data loss) and
   live-only docs (expected: ingested since the snapshot). Extract the tgz to the scratchpad, never
   over the live store. If `J:` is not mounted, return `severity:info` saying the check was skipped —
-  do not guess. `J:` only exists while Google Drive File Stream is running.
+  do not guess. `$DRIVE` only resolves while Google Drive File Stream is running.
 - **F — filesystem leftovers.** Leftover slice PDFs (`stem-NN-MM.pdf`) in `IN\` whose source is
   already ingested, stale `ingest_FAILED_*.log` / `ingest_CRASHED_*.log` / `LAST_FAILURE.txt`,
   orphaned `data\mineru_output` folders with no matching doc.
