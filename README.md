@@ -11,7 +11,7 @@ all discovered at runtime.
 ## Running an ingest
 
 ```powershell
-& $env:RAGKIT_HOME\ingest.ps1 -Root F:\...\PCM_RAG -ListFile <utf8 list> [-Merged] [-Pages 10]
+& $env:RAGKIT_HOME\ingest.ps1 -Root <base dir> -ListFile <utf8 list> [-Merged] [-Pages 10]
 ```
 
 Detached (how the skills launch it):
