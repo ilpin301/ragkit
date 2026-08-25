@@ -79,8 +79,10 @@ Exactly two facts are per-machine. Everything else derives.
 
 Nothing to register in the kit. The base needs:
 
-- `lightrag\.env` with `PORT`, `EMBEDDING_DIM`, and `ZAI_API_KEY` or
-  `LLM_BINDING_API_KEY` (`ZAI_API_KEY` wins when both are present)
+- `lightrag\.env` with `PORT`, `EMBEDDING_DIM`, `COMPOSE_PROJECT_NAME`, and `ZAI_API_KEY` or
+  `LLM_BINDING_API_KEY` (`ZAI_API_KEY` wins when both are present). `COMPOSE_PROJECT_NAME` is
+  not optional: without it docker compose derives the project from the folder name, which is
+  `lightrag` for every base, and commands land on whichever base was started last.
 - a docker-compose in `lightrag\`
 - `IN\` for incoming PDFs and `lightrag\INGESTED_SOURCES.txt` as the ledger
 

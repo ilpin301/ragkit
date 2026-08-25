@@ -64,6 +64,10 @@ $key = Get-EnvValue 'ZAI_API_KEY'
 if (-not $key) { $key = Get-EnvValue 'LLM_BINDING_API_KEY' }
 if (-not $key) { throw "ingest.ps1: neither ZAI_API_KEY nor LLM_BINDING_API_KEY in $envFile" }
 if (-not (Get-EnvValue 'EMBEDDING_DIM')) { throw "ingest.ps1: EMBEDDING_DIM missing from $envFile - check_vectors.py must never guess the dim" }
+# Without COMPOSE_PROJECT_NAME, docker compose derives the project from the folder
+# name - 'lightrag' for every base - so the stop below would hit another base's
+# container. Both existing bases already set it; a new base must too.
+if (-not (Get-EnvValue 'COMPOSE_PROJECT_NAME')) { throw "ingest.ps1: COMPOSE_PROJECT_NAME missing from $envFile - refusing to run docker compose against an ambiguous project" }
 
 $LOG = Join-Path $baseLr 'LOG'
 New-Item -ItemType Directory -Force -Path $LOG | Out-Null   # a brand-new base has no LOG\
