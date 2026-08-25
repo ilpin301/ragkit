@@ -1,0 +1,8 @@
+# The one per-machine file. Never committed - a machine.ps1 from another box
+# points $VENV at a path that does not exist here.
+machine.ps1
+.venv/
+__pycache__/
+*.pyc
+# secrets live in each base's lightrag\.env and are copied by hand per machine
+.env
