@@ -1,0 +1,2 @@
+# never touch line endings: the tiktoken seed files are byte-exact caches
+* -text
