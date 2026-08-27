@@ -28,11 +28,26 @@ for every base on the machine.
    cache and checks Docker.
 5. GPU is optional — MinerU uses CUDA automatically when torch sees it.
 
-## Steps
+## The short way
 
-1. **Clone LightRAG** into `<BASE>\lightrag`.
+```powershell
+& $env:RAGKIT_HOME
+ew_base.ps1 -Name MY_RAG -Start
+```
 
-2. **Write `.env`** — copy an existing base's file and change exactly three values:
+Picks a free port, generates the server key and `COMPOSE_PROJECT_NAME`, writes `.env` from
+`template\env.template` (or from `-From <existing base>`), lays out `IN\`, `lightrag\data\`,
+`LOG\` and the ledger, and starts the container. The rest of this file is what it does, for the
+cases it does not fit.
+
+## Steps (manual)
+
+1. **Create `<BASE>\lightrag`.** Copy `template\docker-compose.yml` into it. A full clone of
+   hkuds/lightrag is only needed if the base must vendor its own `lightrag\lightrag\` package —
+   the shipped compose pulls `ghcr.io/hkuds/lightrag:latest`.
+
+2. **Write `.env`** — copy `template\env.template` or an existing base's file and change exactly
+   three values:
    - `PORT` — any free port.
    - `LIGHTRAG_API_KEY` — a fresh random hex value, never reused between bases.
    - `COMPOSE_PROJECT_NAME` — unique per base.

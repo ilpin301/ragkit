@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 # secrets live in each base's lightrag\.env and are copied by hand per machine
 .env
+.claude/

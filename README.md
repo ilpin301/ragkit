@@ -12,7 +12,8 @@ all discovered at runtime.
 
 | File | What |
 |---|---|
-| `NEW_BASE.md` | machine prerequisites and the steps to create a base |
+| `QUICKSTART.md` | **start here** — zip to working base in three commands |
+| `NEW_BASE.md` | machine prerequisites and the manual base layout |
 | `OPERATING.md` | how to run, verify and recover an ingest — the reasoning behind the skills |
 
 Both are base-independent; per-base state belongs in that base's own notes.
@@ -44,9 +45,11 @@ so a rejected invocation can never leave a base's server down.
 
 | File | What |
 |---|---|
+| `new_base.ps1` | creates a base: port, keys, layout, `.env`, compose, optional start |
+| `pack.ps1` | zips the kit for another machine (no venv, no git, no keys) |
+| `bootstrap.ps1` | run once per machine; writes `machine.ps1`, installs the skills |
 | `ingest.ps1` | the only entrypoint; universal launcher |
 | `notify.ps1` | `Play-RagSound -Success\|-Failure`; fired once by `ingest.ps1` |
-| `bootstrap.ps1` | run once per machine; writes `machine.ps1`, installs the skills |
 | `ragbase.py` | resolves `RAGBASE_ROOT` into root/storage/data + reads `<root>\lightrag\.env` |
 | `rag_ingest.py` | RAG-Anything + MinerU ingest; carries the three monkey-patches and the periodic LLM-cache flush |
 | `ingest_merged.py` | slices a large PDF, parses each slice, inserts **one** merged document |
@@ -68,7 +71,7 @@ stays in PCM_RAG. `cleanup_leftovers.ps1`, `delete_dup_stub.ps1` and
 
 Three facts are per-machine. Everything else derives.
 
-1. `git clone` this kit.
+1. `git clone` this kit, or unzip the archive `pack.ps1` produced.
 2. `.\bootstrap.ps1` — verifies Python 3.13.x, creates or reuses a venv,
    installs `requirements.txt`, decides CUDA via `torch.cuda.is_available()`
    (not `nvidia-smi`), writes **`machine.ps1`** (`$VENV`, `$HasCUDA`, `$DRIVE`), installs
@@ -87,7 +90,13 @@ Three facts are per-machine. Everything else derives.
 
 ## Adding a base
 
-Nothing to register in the kit. The base needs:
+```powershell
+.
+ew_base.ps1 -Name MY_RAG -Start
+```
+
+Nothing to register in the kit. `new_base.ps1` produces exactly what follows;
+build it by hand only if the generated layout does not fit. The base needs:
 
 - `lightrag\.env` with `PORT`, `EMBEDDING_DIM`, `COMPOSE_PROJECT_NAME`, and `ZAI_API_KEY` or
   `LLM_BINDING_API_KEY` (`ZAI_API_KEY` wins when both are present). `COMPOSE_PROJECT_NAME` is
