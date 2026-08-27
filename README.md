@@ -8,6 +8,15 @@ docker-compose — e.g. `PCM_RAG`, `MECH_RAG`. Nothing about a specific base is
 baked into the kit: root, port, container name, API key and embedding dim are
 all discovered at runtime.
 
+## Docs
+
+| File | What |
+|---|---|
+| `NEW_BASE.md` | machine prerequisites and the steps to create a base |
+| `OPERATING.md` | how to run, verify and recover an ingest — the reasoning behind the skills |
+
+Both are base-independent; per-base state belongs in that base's own notes.
+
 ## Running an ingest
 
 ```powershell
