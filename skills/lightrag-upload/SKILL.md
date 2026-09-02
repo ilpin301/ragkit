@@ -59,6 +59,12 @@ the doc count actually rose before waiting on a pipeline that was never given an
 Only text-shaped documents belong here. If the PDF has images or vector figures, route it to
 `il-rag-ingest` / `raganything-ingest` instead — see the probe in `il-rag-ingest` Step 2.
 
+Server-side extraction hits the same z.ai rate limits as a local ingest run: a 429 can drop a
+multimodal item permanently even while the upload itself reports success and the doc finalizes as
+`processed`. Before calling an upload complete, check the server log / archived ingest log for
+permanent losses, not just the upload response. The full detection procedure (greps, what counts as
+a permanent loss) lives in `raganything-ingest` and `il-rag-ingest` — follow it, don't re-derive it here.
+
 ## Keep the machine awake (mandatory)
 
 Any long-running RAG shell process — ingest, parse, insert, delete, enrich, audit — must run with sleep blocked, or the box suspends mid-run and the job dies.

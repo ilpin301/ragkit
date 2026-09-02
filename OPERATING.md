@@ -59,6 +59,10 @@ similarity for the whole base, with no error anywhere. Check all four:
    `EMBEDDING_DIM` and is never defaulted.
 3. The document is listed in `/documents` as `processed`.
 4. One real query returns topically correct content with citations.
+5. **The mandatory error-correction pass** (see below). `EXITCODE=0` proves neither working
+   embeddings nor complete coverage — z.ai's per-minute request-rate limit (code 1302, distinct from
+   the concurrency limit 1305) can burst past every retry and drop an item permanently while the run
+   still exits clean.
 
 `kv_store_doc_status.json` is authoritative only with the container stopped and the file re-read.
 The server does not shut down gracefully, so a normal stop leaves `Exited (137)` — that is the
@@ -67,7 +71,57 @@ process ignoring SIGTERM, not evidence of an OOM kill or a damaged store.
 `ingest_triage.py <failed log>` classifies a non-zero exit (parse failure, CUDA OOM, host OOM, rate
 limit, unreachable endpoint, interrupted).
 
+### The error-correction pass (mandatory, every ingest)
+
+Sources here are often technical content where an equation or figure IS the content — a silently
+dropped one is real data loss, not a rounding error. `openai` client retries (0.4-0.98s backoff) are
+too short to clear a per-minute rate window, so a burst can exhaust every retry. The failure then
+cascades through three stages and only the last one loses data:
+
+1. A request hits 429 (code 1302, rate; or 1305, concurrency) and the client retries — usually wins.
+2. A whole chunk's batch multimodal call exhausts its retries (`RetryError`), logs `WARNING: Falling
+   back to individual multimodal processing`, and reprocesses that chunk's items one at a time. This
+   stage **self-heals** — do not count it as loss.
+3. Inside that fallback, a single item can still fail permanently: `ERROR: Error generating equation
+   description: RetryError[...]`. That item gets no VLM description — no entities/relations from it
+   enter the graph — but the chunk's surrounding text is still chunked and embedded and stays
+   retrievable.
+
+Run against the archived log:
+
+```
+grep -c '^ERROR' <log>
+grep -n 'RetryError' <log>
+```
+
+Then separate the three stages instead of treating the `ERROR` count as loss:
+
+- Count only `Error generating .* description` lines, and `Error in multimodal processing` lines
+  that are **not** followed by a `Falling back to individual multimodal processing` that itself
+  succeeds — those are the permanent losses.
+- Everything else (bare 429s that were retried and won, batch failures that fell back and
+  succeeded) is noise: expected, self-healed, not a finding.
+
+The pass is done only when this count is zero. On a nonzero count:
+
+1. In that base's `lightrag\.env`, lower `MAX_ASYNC` and the per-role extract/VLM concurrency limits
+   **first** — otherwise the re-run reproduces the same burst and drops the same (or a different)
+   item again.
+2. Delete the affected document(s) (see Deleting documents, below) and re-ingest just those.
+3. Re-grep the new log the same way. Repeat until clean.
+
+The LLM response cache makes this loop cheap: everything that already succeeded is a cache hit on
+the retry, so only the actually-dropped item does real work against the API.
+
 ## After success — and only after
+
+`EXITCODE=0` is not "finished" — an ingest is finished only when the error-correction pass above
+reports zero permanent losses. Nothing below (run log, archived log, LLM response cache) may be
+deleted before that.
+
+The launcher no longer deletes the run log on success: it archives it in place as
+`ingest_run.<yyyyMMdd_HHmmss>.ok.log` in the same `LOG` folder. That archived file is the input to
+the correction pass — do not delete it until the pass is clean.
 
 1. Append the finished **source** filename to `lightrag\INGESTED_SOURCES.txt`. The ledger is
    load-bearing: slices ingested under renamed short names make a filename diff of `IN\` against
@@ -77,12 +131,15 @@ limit, unreachable endpoint, interrupted).
 2. If **every** slice of a source is processed, delete the slice PDFs from `IN\` and keep the source
    — the slices are build artifacts, the source is the asset. If any slice failed, keep them all so
    the failure can be retried without re-slicing.
-3. Delete the run log. It is opened in append mode, so a stale `EXITCODE=0` line from a previous run
-   makes the next watcher report "done" while the new run is still parsing. Deleting before a run
-   does not satisfy this.
+3. Delete the archived `ingest_run.<stamp>.ok.log` **only after the correction pass reports zero
+   permanent losses**. The live `ingest_run.log` is opened in append mode, so a stale `EXITCODE=0`
+   line from a previous run makes the next watcher report "done" while the new run is still
+   parsing — deleting the archive before a run does not satisfy this; the next run starts its own
+   fresh `ingest_run.log`.
 4. Kill the background shells started for the run (waiters, tails, keepawake) — before deleting the
    logs, or a live tail holds the handle.
-5. With the container stopped, drop `kv_store_llm_response_cache.json`.
+5. With the container stopped, drop `kv_store_llm_response_cache.json` — only once the correction
+   pass is clean; it is what makes a correction re-run cheap.
 6. Update that base's ingest-state memory in the same turn the run is verified.
 
 On a failed or killed run, keep everything: the logs and shells are the diagnosis.

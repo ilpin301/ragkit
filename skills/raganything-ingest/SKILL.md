@@ -93,15 +93,17 @@ while :; do
     n=$(wc -l < LOG/ingest_run.log)
     grep -q EXITCODE LOG/ingest_run.log && break
   else
-    echo "EXITCODE=0 (log deleted on success)"; break
+    echo "EXITCODE=0 (log archived as ingest_run.<stamp>.ok.log on success)"; break
   fi
   sleep 5
 done
 ```
 
-Success = `EXITCODE=0`. On success the launcher deletes the log, plays `Ring10.wav` and restarts the
-container; on failure it keeps a timestamped `ingest_FAILED_<stamp>.log`, writes `LAST_FAILURE.txt`
-with the triage verdict, and plays `Windows Critical Stop.wav`.
+Success = `EXITCODE=0`. On success the launcher archives the log as
+`ingest_run.<yyyyMMdd_HHmmss>.ok.log` (it no longer deletes it — that archive is the required input
+to the mandatory error-correction pass, see below), plays `Ring10.wav` and restarts the container; on
+failure it keeps a timestamped `ingest_FAILED_<stamp>.log`, writes `LAST_FAILURE.txt` with the triage
+verdict, and plays `Windows Critical Stop.wav`.
 
 ## Expect it to be slow
 
@@ -155,18 +157,55 @@ private call paths that a minor version bump can move silently.
 
 ## z.ai 429 behavior
 
-`ERROR: OpenAI API Rate Limit Error ... code 1305` = z.ai **concurrency** limit, NOT a per-minute
-rate. "OpenAI" is the openai python client used as transport for z.ai, not OpenAI the service.
-Occasional 429s are absorbed by retry backoff — normal, ignore. Items logging `RetryError` (retries
-exhausted) are SKIPPED, leaving graph gaps; re-run later when z.ai load drops.
+`ERROR: OpenAI API Rate Limit Error` wraps TWO distinct z.ai limits — "OpenAI" is just the openai
+python client used as transport for z.ai, not OpenAI the service:
+
+- **code 1305** = **concurrency** limit (too many requests in flight at once).
+- **code 1302** = **request-rate** limit (too many requests per minute — a burst, even at low
+  concurrency, exhausts this window). `429 - {'error': {'code': '1302', 'message': 'Rate limit
+  reached for requests'}}` observed 2026-08-29.
+
+Both surface identically as "OpenAI API Rate Limit Error", so the code in the message is the only way
+to tell which limit was hit.
+
+**Three-stage cascade — only the last stage loses data:**
+
+1. `openai._base_client` retries with sub-second backoff (0.4-0.98 s). Too short to clear a
+   per-minute window, so a real burst exhausts every attempt. Normal, ignore.
+2. Batch multimodal processing of a chunk raises `RetryError`, RAG-Anything logs `WARNING: Falling
+   back to individual multimodal processing`, and reprocesses that chunk's items one at a time. This
+   **self-heals** — not a loss by itself.
+3. Inside that serial fallback, a single item can still exhaust its retries permanently:
+   `ERROR: Error generating equation description: RetryError[...]`. That item gets no VLM
+   description, so it contributes no entities/relations. The chunk's own text is still chunked and
+   embedded — only the multimodal description for that one item is gone. One observed run: 11
+   `ERROR` lines total = 8 transient + 2 recovered by the fallback + 1 permanent loss; `Traceback` 0,
+   `ABORT` 0, and the run still reported `EXITCODE=0`.
+
+**Do not treat a permanent loss as "re-run later."** Sources here are technical mechanics textbooks —
+equations and figures ARE the content, so a silently dropped item is real data loss, and the user has
+made the correction pass mandatory after every ingest in every base. The mandatory loop:
+
+1. Lower `MAX_ASYNC` and the per-role extract/vlm concurrency limits in `lightrag\.env` FIRST. Re-running
+   at the same concurrency reproduces the same burst and fails the same way.
+2. Delete the affected document (`DELETE /documents/delete_document`, see below) and re-ingest it.
+3. Re-grep the new archived log for permanent losses (`grep -c '^ERROR'`, `grep -n 'RetryError'` —
+   see `il-rag-ingest` Step 6 for how to tell a permanent loss apart from the transient/self-healed
+   stages above).
+4. Repeat 1-3 until the permanent-loss count is zero. Only then is cleanup allowed.
 
 ## Kill/restart is safe and cheap — mid-run
 
 - Parse cache persists after each call — a re-run skips MinerU entirely (the log shows
   `Parsing (native):` instead of a MinerU invocation).
 - The LLM response cache only replays free **if the run was checkpointed** — see below.
-- After a successful ingest the response cache is deleted by the cleanup rule, so the NEXT re-run of
-  that same document pays full extraction again. Kill/restart is cheap mid-run, not after success.
+- The response cache is NOT deleted at `EXITCODE=0` any more — the cleanup rule now gates on the
+  error-correction pass reporting zero permanent losses (see z.ai 429 behavior, above). This is
+  precisely what makes a corrective re-ingest cheap: an item that already succeeded is a cache hit,
+  and only the item that permanently failed (and so has no cache entry) is genuinely re-extracted.
+  Once the correction pass IS clean and the cache is deleted, the next re-run of that document pays
+  full extraction again — so kill/restart and corrective re-ingest are cheap up to that point, not
+  after.
 - Multimodal VLM descriptions may NOT hit cache — expect those to re-run.
 - **`vdb_*.json` only exist after a clean `EXITCODE=0` finish.** A killed run can leave them missing
   or stale, and queries then return `[no-context]`. Fix: run to clean completion.
@@ -303,16 +342,22 @@ Gotcha: PowerShell parses `0x80000000` as a signed Int32, so building the flags 
 
 ## Cleanup after success (mandatory)
 
-When the run finishes SUCCESSFULLY — `EXITCODE=0` and the verification steps passed — do both of these before reporting done:
+When the run finishes SUCCESSFULLY — `EXITCODE=0`, verification passed, AND the mandatory
+error-correction pass (z.ai 429 behavior, above) reports zero permanent losses — do both of these
+before reporting done:
 
 1. **Kill every shell process started for this run.** Background waiters, `tail -f` tails, monitors, poll loops, and the `keepawake.ps1` process — the user's and yours. Use `TaskStop` on each background task id. Leave nothing running.
-2. **Delete the logs the run produced.** `lightrag\LOG\ingest_run.log`, `LOG\*.log` for this run, and any scratchpad task-output files.
+2. **Delete the archived log** (`ingest_run.<stamp>.ok.log`) and any scratchpad task-output files for this run.
 
-Order matters: kill the tails BEFORE deleting the logs, or a live `tail -f` holds the handle.
+Order matters: kill the tails BEFORE deleting the log, or a live `tail -f` holds the handle.
 
-NEVER do either of these before success. While a run is in flight the log is the only evidence of progress, and on a FAILED or killed run both the logs and the shells must be KEPT for diagnosis.
+NEVER do either of these before the correction pass is clean. The archived log is the input the
+correction pass re-checks after every corrective re-ingest — it must survive until that pass reports
+zero permanent losses, not merely until `EXITCODE=0`. On a FAILED or killed run, or a run still
+carrying a permanent loss, both the log and the shells must be KEPT for diagnosis.
 
-**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed:
+**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed
+AND the error-correction pass reports zero permanent losses:
 
 ```powershell
 docker stop $Container     # never delete while the server holds its own in-memory copy

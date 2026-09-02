@@ -80,6 +80,50 @@ WORKING_DIR = ragbase.STORAGE
 
 _VLM_SEMAPHORE = asyncio.Semaphore(2)
 
+# --- z.ai 429 hardening -------------------------------------------------------
+# z.ai enforces a per-MINUTE request rate (429, code 1302; 1305 is the separate
+# concurrency cap). The openai client retries with sub-second backoffs (0.4-1.0 s),
+# which cannot outlast a per-minute window, so a burst exhausts every attempt and
+# lightrag surfaces tenacity's RetryError. raganything then drops that ONE item:
+# an equation or image gets no VLM description, so no entities or relations ever
+# enter the graph from it, while the run still finishes EXITCODE=0 and the store
+# looks perfectly healthy. Observed 2026-08-29: one equation lost this way.
+# Retrying on a minute-scale schedule is what actually clears a per-minute limit.
+# Both llm_model_func and vision_model_func route through this name, so rebinding
+# the module global covers every call site.
+_zai_raw_complete = openai_complete_if_cache
+_ZAI_BACKOFF = (20, 45, 90, 150)
+
+
+def _is_rate_limit(exc):
+    """True if exc is a 429, including one wrapped in tenacity's RetryError."""
+    from openai import RateLimitError
+    if isinstance(exc, RateLimitError):
+        return True
+    inner = getattr(getattr(exc, "last_attempt", None), "exception", None)
+    if callable(inner):
+        try:
+            return isinstance(inner(), RateLimitError)
+        except Exception:
+            return False
+    return False
+
+
+async def _complete_with_backoff(*args, **kwargs):
+    for delay in _ZAI_BACKOFF:
+        try:
+            return await _zai_raw_complete(*args, **kwargs)
+        except Exception as exc:
+            if not _is_rate_limit(exc):
+                raise
+            print(f"WARNING: z.ai 429, sleeping {delay}s before retry", flush=True)
+            await asyncio.sleep(delay)
+    return await _zai_raw_complete(*args, **kwargs)
+
+
+openai_complete_if_cache = _complete_with_backoff
+# --- end 429 hardening --------------------------------------------------------
+
 
 async def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
     return await openai_complete_if_cache(

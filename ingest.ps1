@@ -117,11 +117,34 @@ if ($ec -eq 0) {
   if ($LASTEXITCODE -ne 0) { $ec = $LASTEXITCODE }
 }
 
+# A z.ai 429 burst (code 1302, the per-minute request rate) can exhaust the sub-second retry
+# backoffs and permanently drop a single multimodal item - "ERROR: Error generating <kind>
+# description: RetryError[...]" - while the run still finishes EXITCODE=0 with no Traceback and no
+# ABORT. That item gets no VLM description, so no entities or relations ever enter the graph from
+# it, and NOTHING in the store reveals it afterwards: chunks, vectors and doc status all look
+# perfectly healthy. The batch-level "Error in multimodal processing" is deliberately NOT counted -
+# it self-heals via "Falling back to individual multimodal processing". Failing the run here is what
+# keeps the log (the error-correction pass needs it) and stops a lossy run reporting success.
+if ($ec -eq 0) {
+  $lost = @(Select-String -LiteralPath $runLog -Pattern 'Error generating .+ description: RetryError' -ErrorAction SilentlyContinue).Count
+  if ($lost -gt 0) {
+    "PERMANENT_MULTIMODAL_LOSSES=$lost" | Add-Content -LiteralPath $runLog -Encoding UTF8
+    "$lost multimodal item(s) permanently dropped to z.ai 429. Run the error-correction pass: lower MAX_ASYNC and the per-role extract/vlm limits in .env, then delete + re-ingest the affected document(s), then re-grep." | Add-Content -LiteralPath $runLog -Encoding UTF8
+    $ec = 4
+  }
+}
+
 "EXITCODE=$ec" | Add-Content -LiteralPath $runLog -Encoding UTF8
 
 . (Join-Path $PSScriptRoot 'notify.ps1')
 if ($ec -eq 0) {
-  Remove-Item -LiteralPath $runLog -Force
+  # Archive, never delete: this log is the only record of which items the
+  # mandatory post-ingest error-correction pass has to check for permanent
+  # losses (see OPERATING.md). It must survive until that pass reports zero.
+  if (Test-Path -LiteralPath $runLog) {
+    $okStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    Move-Item -LiteralPath $runLog -Destination (Join-Path $LOG "ingest_run.$okStamp.ok.log") -Force
+  }
   Remove-Item -LiteralPath (Join-Path $LOG 'LAST_FAILURE.txt') -Force -ErrorAction SilentlyContinue
   Play-RagSound -Success
 } else {

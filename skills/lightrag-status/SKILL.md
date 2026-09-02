@@ -62,6 +62,10 @@ $fileCount = ((Get-Content (Join-Path $Store 'kv_store_doc_status.json') -Raw | 
 
 A positive difference against the API count IS a hidden `handling` doc, not noise.
 
+**`processed` is not proof of complete coverage.** A doc can finalize as `processed` while one of its
+multimodal items was silently dropped to a z.ai 429 during extraction — the doc status alone can't see
+this. When coverage matters, use the check in `il-rag-ingest` / `raganything-ingest`.
+
 ## Keep the machine awake (mandatory)
 
 Any long-running RAG shell process — ingest, parse, insert, delete, enrich, audit — must run with sleep blocked, or the box suspends mid-run and the job dies.

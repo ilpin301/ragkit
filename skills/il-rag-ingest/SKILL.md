@@ -64,7 +64,10 @@ Get-Content (Join-Path $LrDir 'LOG\LAST_FAILURE.txt') -ErrorAction SilentlyConti
   another; attach to it at Step 4 instead.
 - `LAST_FAILURE.txt` present => the previous run failed. Read it (it already contains
   `ingest_triage.py` output with a verdict + hint) and report before doing anything new.
-- **Never wipe `ingest_run.log` before a run.** The launcher deletes it itself on `EXITCODE=0`.
+- **Never wipe `ingest_run.log` before a run.** On `EXITCODE=0` the launcher now ARCHIVES it as
+  `ingest_run.<yyyyMMdd_HHmmss>.ok.log` instead of deleting it — that archived log is the required
+  input to the Step 6 error-correction pass and must survive until that pass reports zero permanent
+  losses.
 
 `GET /documents` **hides `handling` rows**, so a half-ingested doc is invisible there. Cross-check the
 store's own count before trusting a clean bill:
@@ -185,7 +188,8 @@ while [ -f LOG/ingest_run.log ] && ! grep -q EXITCODE LOG/ingest_run.log; do sle
 if [ -f LOG/LAST_FAILURE.txt ]; then cat LOG/LAST_FAILURE.txt; else echo "EXITCODE=0"; fi
 ```
 
-Log deleted + no `LAST_FAILURE.txt` = success (the launcher deletes the log on `EXITCODE=0`), and the
+`EXITCODE=0` line + no `LAST_FAILURE.txt` = success (the launcher archives the log to
+`ingest_run.<stamp>.ok.log` on `EXITCODE=0`, it no longer deletes it), and the
 success wav plays. On a long multimodal run, arm the waiter on the serial-fallback line too — see
 `raganything-ingest`.
 
@@ -221,7 +225,7 @@ once in `raganything-ingest`. Reuse them; do not invent new recovery moves.
 
 If the doc is already registered (typically stuck `handling` from an earlier killed run),
 `rag_ingest.py` writes a fresh `dup-*` FAILED stub and exits **0** in under a minute. The launcher
-deletes the log, the waiter reports success, the success wav plays — and nothing was ingested.
+archives the log, the waiter reports success, the success wav plays — and nothing was ingested.
 Signature: finished far too fast, graph node/edge counts unchanged, vdb files byte-identical.
 
 Deleting the `dup-*` stub does NOT fix this — the stub is a shadow of the real doc and comes back.
@@ -245,9 +249,19 @@ same doc id (hashed from the file path), which is expected. See [[project_lightr
 Also check for the rest of the wreckage a killed run leaves: other docs stuck in `handling`, and
 missing vdb files.
 
-## Step 6 — verify (non-optional, all four)
+### The other dangerous `EXITCODE=0` case: silent multimodal data loss
 
-**`EXITCODE=0` is not evidence that anything was ingested** — see the no-op case above. Only the
+A run can do real work, exit 0, grow the graph and vdb files — and still have silently dropped one or
+more equations/figures/tables. z.ai 429s (rate-limit code 1302 per-minute, concurrency code 1305)
+trigger a batch-to-serial fallback that self-heals almost every item, but a single item inside that
+fallback can exhaust its retries permanently: `ERROR: Error generating equation description:
+RetryError[...]`. No VLM description means no entities/relations from that item — everything else in
+the run looks completely healthy. This is why Step 6's error-correction grep is non-optional on every
+run, not just ones that "look" like they had trouble.
+
+## Step 6 — verify (non-optional, all five)
+
+**`EXITCODE=0` is not evidence that anything was ingested** — see the no-op cases above. Only the
 deltas below prove work happened. Record the baseline BEFORE launching (node and edge counts on the
 graphml, plus the three vdb file sizes and mtimes).
 
@@ -274,8 +288,37 @@ graphml, plus the three vdb file sizes and mtimes).
    repair.
 4. **One targeted query** per ingested doc via `lightrag-query`, asking something only that document
    answers. The answer must cite it.
+5. **Error-correction pass (mandatory)** — grep the archived log for VLM/multimodal loss, not just
+   for the process exit code. Sources here are technical mechanics textbooks: equations and figures
+   ARE the content, so a dropped equation is real data loss, not a cosmetic warning.
 
-Report the four numbers. Do not claim success without them.
+   ```sh
+   grep -c '^ERROR' lightrag/LOG/ingest_run.<stamp>.ok.log
+   grep -n 'RetryError' lightrag/LOG/ingest_run.<stamp>.ok.log
+   ```
+
+   Classify every hit before drawing a conclusion — most of them are transient or self-healed, not
+   loss:
+
+   - **Transient** — `openai._base_client` retrying with sub-second backoff. Ignore.
+   - **Self-healed** — `WARNING: Falling back to individual multimodal processing` after a batch
+     `RetryError`: the chunk gets reprocessed item-by-item and normally succeeds. Not a loss by
+     itself.
+   - **Permanent loss** — a `RetryError` INSIDE the serial fallback for a single item, e.g.
+     `ERROR: Error generating equation description: RetryError[...]`. That item got no VLM
+     description, so it contributed no entities/relations. This is the only count that matters for
+     the gate below.
+
+   Only a `Traceback` or an `ABORT` line, or a nonzero permanent-loss count, fails this check — a
+   run can log several ERROR/RetryError lines and still be clean if every one of them resolved via
+   the self-heal path. If the permanent-loss count is nonzero: lower `MAX_ASYNC` and the per-role
+   extract/vlm concurrency limits in `lightrag\.env` (a rerun at the same concurrency reproduces the
+   same burst), delete the affected document, re-ingest it, and re-run this grep — repeat until the
+   permanent-loss count is zero. See `raganything-ingest` for the full z.ai 429 cascade and the
+   delete/re-ingest mechanics.
+
+Report the five numbers (four counts plus the permanent-loss count). Do not claim success without
+them.
 
 **Never verify a deletion from `docker logs`** — the line scrolls out of the tail window and the
 waiter hangs forever. Verify from the store files:
@@ -294,7 +337,10 @@ the model emitted a near-miss tuple delimiter, so the record split short and
 
 ## Step 7 — cleanup and bookkeeping
 
-Only after `EXITCODE=0` **and** Step 6 passing:
+Only after `EXITCODE=0` **and** Step 6 passing **and** the Step 6.5 error-correction pass reports a
+permanent-loss count of zero. `EXITCODE=0` alone never gates cleanup — nothing (the archived log, the
+LLM response cache) gets deleted while a permanent loss is still open, because the archived log is
+the input the correction pass re-checks after every corrective re-ingest.
 
 - delete the slice PDFs (`stem-NN-MM.pdf`); keep the source PDF. The kit has an idempotent,
   dry-run-by-default helper:
@@ -305,7 +351,8 @@ Only after `EXITCODE=0` **and** Step 6 passing:
 - `docker ps` to confirm the container came back up (the launcher runs `docker compose start`, which
   fails silently if Docker Desktop is down)
 
-Emit ONE end-of-run summary: files ingested, the four verification numbers, anything skipped and why.
+Emit ONE end-of-run summary: files ingested, the five verification numbers (including the
+permanent-loss count), anything skipped and why.
 
 **Always sweep orphaned vectors after a delete.** `DELETE /documents/delete_document` strands entity
 vectors that the graph no longer has, on clean deletes too. The procedure is in `raganything-ingest`.
@@ -354,16 +401,21 @@ Gotcha: PowerShell parses `0x80000000` as a signed Int32, so building the flags 
 
 ## Cleanup after success (mandatory)
 
-When the run finishes SUCCESSFULLY — `EXITCODE=0` and the verification steps passed — do both of these before reporting done:
+When the run finishes SUCCESSFULLY — `EXITCODE=0`, Step 6 verification passed, AND the Step 6.5
+error-correction pass reports zero permanent losses — do both of these before reporting done:
 
 1. **Kill every shell process started for this run.** Background waiters, `tail -f` tails, monitors, poll loops, and the `keepawake.ps1` process — the user's and yours. Use `TaskStop` on each background task id. Leave nothing running.
-2. **Delete the logs the run produced.** `lightrag\LOG\ingest_run.log`, `LOG\*.log` for this run, and any scratchpad task-output files.
+2. **Delete the archived log** (`ingest_run.<stamp>.ok.log`) and any scratchpad task-output files for this run.
 
-Order matters: kill the tails BEFORE deleting the logs, or a live `tail -f` holds the handle.
+Order matters: kill the tails BEFORE deleting the log, or a live `tail -f` holds the handle.
 
-NEVER do either of these before success. While a run is in flight the log is the only evidence of progress, and on a FAILED or killed run both the logs and the shells must be KEPT for diagnosis.
+NEVER do either of these before the correction pass is clean. The archived log is the input the
+correction pass re-checks after every corrective re-ingest, so it must survive until that pass
+reports zero permanent losses — not merely until `EXITCODE=0`. On a FAILED or killed run, or a run
+still carrying a permanent loss, both the log and the shells must be KEPT for diagnosis.
 
-**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed:
+**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed
+AND the error-correction pass reports zero permanent losses:
 
 ```powershell
 docker stop $Container     # never delete while the server holds its own in-memory copy

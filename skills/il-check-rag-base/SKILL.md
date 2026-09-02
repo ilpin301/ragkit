@@ -148,6 +148,13 @@ Each row: invariant, what, evidence (file + id/count), severity. Deduplicate fin
 report from different angles (a killed run shows up in B, C and D at once — say so once, note the
 corroboration).
 
+**Archived ingest logs, when present, are part of reconciliation.** If `LOG\ingest_run.*.ok.log` or
+`LOG\ingest_FAILED_*.log` files exist in the base, grep them for permanent multimodal losses to a z.ai
+429 (`grep -c '^ERROR'`, `grep -n 'RetryError'` — count only `Error generating .* description` and
+unrecovered `Error in multimodal processing`) and add any hits as a `warning` finding. These are graph
+gaps no store-side invariant can see: the vectors and chunks look perfectly healthy while the dropped
+equation's entities were simply never created.
+
 ## Step 3 — write dry-run repair scripts (do NOT execute)
 
 One idempotent script per genuine issue, written into `lightrag\repairs\` inside the BASE — a repair
