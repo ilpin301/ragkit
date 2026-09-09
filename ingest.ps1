@@ -105,6 +105,21 @@ if ($stillUp) { throw "ingest.ps1: container still running after 'docker compose
   Add-Content -LiteralPath $runLog -Encoding UTF8
 "=== lightrag package resolves from: $pkgSource" | Add-Content -LiteralPath $runLog -Encoding UTF8
 
+# Flush-phase safety patches, applied to whichever lightrag package the line
+# above resolved to: fsync the tmp before the atomic rename (a bugcheck can
+# otherwise commit the rename while the data pages are still cached, leaving an
+# all-NUL graphml or vdb) and log start/done + seconds + MB for every storage
+# flush (the multi-GB saves log nothing of their own, so a kill inside the flush
+# used to leave a log whose last line named a storage that had already
+# finished). Idempotent and re-run EVERY ingest so a pip upgrade or a fresh base
+# cannot silently drop them. A non-zero exit means upstream moved and the patch
+# no longer fits - a warning, not a reason to skip the ingest.
+& $python (Join-Path $PSScriptRoot 'repairs\patch_flush_safety.py') *>> $runLog
+if ($LASTEXITCODE -ne 0) {
+  "WARNING: patch_flush_safety.py did not fit this lightrag - fsync and flush logging may be missing" |
+    Add-Content -LiteralPath $runLog -Encoding UTF8
+}
+
 if ($Merged) {
   & $python (Join-Path $PSScriptRoot 'ingest_merged.py') $pdfs[0] --pages $Pages *>> $runLog
 } else {
