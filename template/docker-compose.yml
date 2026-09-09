@@ -26,3 +26,27 @@ services:
       # every endpoint on the published port is public.
       HOST: "0.0.0.0"
       PORT: "9623"
+      # Core LightRAG defaults to NanoVectorDBStorage; only the API server reads
+      # this. rag_ingest.py picks the same value up from .env separately.
+      LIGHTRAG_VECTOR_STORAGE: "${LIGHTRAG_VECTOR_STORAGE:-NanoVectorDBStorage}"
+      # Container-side URL. .env carries the HOST-side one for rag_ingest.py;
+      # load_dotenv(override=False) means this real env var wins in here.
+      QDRANT_URL: "http://qdrant:6333"
+    depends_on:
+      - qdrant
+
+  qdrant:
+    # Vector backend. Pinned - a floating tag would swap the storage engine
+    # under a live store. Storage is a named volume on ext4 inside the WSL
+    # VHDX, never a bind mount onto a Windows drive: Qdrant needs real local-fs
+    # fsync/mmap semantics and drvfs/9p does not provide them.
+    image: qdrant/qdrant:v1.19.1
+    ports:
+      # loopback only - the host ingest connects here, nothing else should
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:

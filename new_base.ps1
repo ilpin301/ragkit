@@ -101,6 +101,21 @@ if ($From) {
     Replace('__LLM_API_KEY__', $(if ($ApiKey) { $ApiKey } else { 'PUT_YOUR_LLM_API_KEY_HERE' }))
 }
 
+# --- vector backend keys ----------------------------------------------------
+# Applied to BOTH paths on purpose. -From copies every key through untouched,
+# so a base seeded from a Qdrant base would inherit its QDRANT_PORT and the two
+# containers would fight over one host port. Derived from $Port, which is
+# already unique per base, so no extra scan is needed.
+$qdrantPort = 6333 + ($Port - 9621)
+$envText = $envText -replace '(?m)^QDRANT_PORT=.*$', "QDRANT_PORT=$qdrantPort"
+$envText = $envText -replace '(?m)^QDRANT_URL=.*$', "QDRANT_URL=http://127.0.0.1:$qdrantPort"
+if ($envText -notmatch '(?m)^QDRANT_PORT=') {
+  $envText += "`nQDRANT_PORT=$qdrantPort`nQDRANT_URL=http://127.0.0.1:$qdrantPort"
+}
+if ($envText -notmatch '(?m)^LIGHTRAG_VECTOR_STORAGE=') {
+  $envText += "`nLIGHTRAG_VECTOR_STORAGE=NanoVectorDBStorage"
+}
+
 # --- layout -----------------------------------------------------------------
 foreach ($d in @(
   $root,

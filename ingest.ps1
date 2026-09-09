@@ -97,9 +97,12 @@ Set-Location -LiteralPath $baseLr
 # rag_ingest.py:4-5 -- shared JSON storage, concurrent writes corrupt it.
 # "already down" is the desired state, so a stop failure is only fatal if
 # something is still up afterwards.
-try { docker compose stop 2>&1 | Out-Null } catch { }
-$stillUp = & { try { docker compose ps --status running -q 2>$null } catch { $null } }
-if ($stillUp) { throw "ingest.ps1: container still running after 'docker compose stop' - refusing to write to a live store" }
+# Only the lightrag service. A vector backend (qdrant) is a SERVER: the host
+# ingest talks to it, so stopping the whole project would break the ingest it
+# is meant to protect. Bases with no such service behave exactly as before.
+try { docker compose stop lightrag 2>&1 | Out-Null } catch { }
+$stillUp = & { try { docker compose ps --status running -q lightrag 2>$null } catch { $null } }
+if ($stillUp) { throw "ingest.ps1: lightrag still running after 'docker compose stop lightrag' - refusing to write to a live store" }
 
 "=== ragkit ingest $(Get-Date -Format 's') root=$Root merged=$($Merged.IsPresent) files=$($pdfs.Count)" |
   Add-Content -LiteralPath $runLog -Encoding UTF8
@@ -174,5 +177,5 @@ if ($ec -eq 0) {
   Play-RagSound -Failure
 }
 
-docker compose start
+docker compose start lightrag
 exit $ec

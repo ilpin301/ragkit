@@ -222,6 +222,11 @@ async def vision_model_func(
 embedding_func = EmbeddingFunc(
     embedding_dim=int(ragbase.require_env("EMBEDDING_DIM")),
     max_token_size=8192,
+    # model_name is NOT cosmetic: base.py::_generate_collection_suffix turns it
+    # into the vector-DB collection suffix. Omit it and this process writes to
+    # lightrag_vdb_entities while the API server reads
+    # lightrag_vdb_entities_bge_m3_1024d -- two stores, no error, no results.
+    model_name=ragbase.require_env("EMBEDDING_MODEL"),
     func=lambda texts: ollama_embed(
         texts, embed_model="bge-m3", host="http://localhost:11434"
     ),
@@ -258,11 +263,22 @@ async def main(paths):
         enable_table_processing=True,
         enable_equation_processing=True,
     )
+    # LightRAG's core dataclass hardcodes vector_storage="NanoVectorDBStorage";
+    # LIGHTRAG_VECTOR_STORAGE is read by the API server ONLY. So the backend has
+    # to be passed explicitly here or the host ingest silently keeps writing
+    # nano JSON while the server serves from Qdrant.
+    lightrag_kwargs = {}
+    vector_storage = ragbase.env_value("LIGHTRAG_VECTOR_STORAGE")
+    if vector_storage:
+        lightrag_kwargs["vector_storage"] = vector_storage
+        print(f"--- vector storage: {vector_storage}", flush=True)
+
     rag = RAGAnything(
         config=config,
         llm_model_func=llm_model_func,
         vision_model_func=vision_model_func,
         embedding_func=embedding_func,
+        lightrag_kwargs=lightrag_kwargs,
     )
     flusher = asyncio.create_task(periodic_cache_flush(rag))
     try:
