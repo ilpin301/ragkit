@@ -77,6 +77,8 @@ $runLog = Join-Path $LOG 'ingest_run.log'
 $env:Path = "$VENV;$env:Path"
 $env:NO_PROXY = '*'
 $env:PYTHONIOENCODING = 'utf-8'
+# unbuffered: a hard hang must not swallow the last KBs of the run log
+$env:PYTHONUNBUFFERED = '1'
 $env:PYTHONINTMAXSTRDIGITS = '0'
 $env:MINERU_DEVICE_MODE = $(if ($HasCUDA) { 'cuda' } else { 'cpu' })
 $env:TIKTOKEN_CACHE_DIR = "$env:TEMP\data-gym-cache"
@@ -151,7 +153,7 @@ if ($ec -eq 0) {
   $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
   $failLog = Join-Path $LOG "ingest_FAILED_$stamp.log"
   Move-Item -LiteralPath $runLog -Destination $failLog -Force
-  $triage = & $python (Join-Path $PSScriptRoot 'ingest_triage.py') $failLog @pdfs 2>&1 | Out-String
+  $triage = & $python (Join-Path $PSScriptRoot 'ingest_triage.py') --exitcode $ec $failLog @pdfs 2>&1 | Out-String
   "EXITCODE=$ec`nWHEN=$stamp`nLOG=$failLog`n$triage" |
     Set-Content -LiteralPath (Join-Path $LOG 'LAST_FAILURE.txt') -Encoding UTF8
   Play-RagSound -Failure
