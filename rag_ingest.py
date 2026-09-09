@@ -72,6 +72,42 @@ def _separate_content_filtered(content_list):
 _rg_utils.separate_content = _separate_content_filtered
 _rg_processor.separate_content = _separate_content_filtered
 
+# Workaround #4: nano-vectordb's save() base64-encodes the entire matrix and
+# then builds the whole JSON document as one string before writing - measured
+# 2.2 GB of transient heap for a 744 MB file, and MECH_RAG's vdb_relationships
+# is 1.19 GB and gets rewritten on EVERY document flush. That burst is the
+# largest freshly-touched-bytes surface in the run, i.e. the biggest crash
+# window on a box with a RAM fault. Stream the matrix instead: peak heap ~9 MB,
+# ~2x faster, and the JSON parses back identically.
+import base64 as _b64
+import json as _json
+import numpy as _np
+from nano_vectordb.dbs import NanoVectorDB as _NanoVectorDB
+
+_orig_nvdb_save = _NanoVectorDB.save
+_B64_CHUNK = 3 * 1024 * 1024  # multiple of 3 -> no base64 padding mid-stream
+
+
+def _streamed_nvdb_save(self):
+    """save() that never materializes the matrix or the JSON document."""
+    storage = self._NanoVectorDB__storage
+    matrix = _np.ascontiguousarray(storage["matrix"])
+    with open(self.storage_file, "w", encoding="utf-8") as f:
+        f.write('{"matrix": "')
+        raw = matrix.reshape(-1).view(_np.uint8)
+        for i in range(0, raw.nbytes, _B64_CHUNK):
+            f.write(_b64.b64encode(raw[i:i + _B64_CHUNK].tobytes()).decode())
+        f.write('"')
+        for key, value in storage.items():
+            if key == "matrix":
+                continue
+            f.write(", " + _json.dumps(key, ensure_ascii=False) + ": ")
+            _json.dump(value, f, ensure_ascii=False)
+        f.write("}")
+
+
+_NanoVectorDB.save = _streamed_nvdb_save
+
 ZAI_KEY = os.environ["ZAI_API_KEY"]
 BASE_URL = "https://api.z.ai/api/coding/paas/v4"
 LLM_MODEL = "glm-5.2"
