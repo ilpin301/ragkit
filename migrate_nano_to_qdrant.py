@@ -169,7 +169,30 @@ def ensure_collection(client, name, dim, apply_writes):
     return True
 
 
-def migrate_store(client, namespace, dim, model_name, workspace, apply_writes):
+def check_count_gate(counted, before, expected, topup):
+    """Raise SystemExit-worthy ValueError if the post-upsert count is wrong.
+
+    Normal mode: the collection must end up with exactly `expected` points.
+    Topup mode: the collection already held `before` points; upserting
+    `expected` more (with possible overwrites of existing ids) must land
+    somewhere in [before, before + expected].
+    """
+    if not topup:
+        if counted != expected:
+            raise ValueError(
+                "qdrant has {:,}, store has {:,}".format(counted, expected))
+        return "count gate OK: {:,} points".format(counted)
+    if not (before <= counted <= before + expected):
+        raise ValueError(
+            "qdrant has {:,}, expected between {:,} (before) and {:,} "
+            "(before + upserted)".format(counted, before, before + expected))
+    overwrites = before + expected - counted
+    return ("count gate OK (topup): {:,} -> {:,} points "
+            "({:,} of {:,} upserted were overwrites)".format(
+                before, counted, overwrites, expected))
+
+
+def migrate_store(client, namespace, dim, model_name, workspace, apply_writes, topup=False):
     path = os.path.join(ragbase.STORAGE, "vdb_{}.json".format(namespace))
     name = collection_name(namespace, model_name, dim)
     size_mb = os.path.getsize(path) / 1024 / 1024
@@ -193,6 +216,8 @@ def migrate_store(client, namespace, dim, model_name, workspace, apply_writes):
 
     counted = None
     if apply_writes:
+        before = 0 if missing else client.count(collection_name=name, exact=True).count
+
         t0 = time.time()
         sent = 0
         last = None
@@ -211,11 +236,13 @@ def migrate_store(client, namespace, dim, model_name, workspace, apply_writes):
               flush=True)
 
         counted = client.count(collection_name=name, exact=True).count
-        if counted != len(records):
+        try:
+            msg = check_count_gate(counted, before, len(records), topup)
+        except ValueError as e:
             raise SystemExit(
-                "COUNT GATE FAILED for {}: qdrant has {:,}, store has {:,} -- "
-                "stopping before the next store".format(namespace, counted, len(records)))
-        print("    count gate OK: {:,} points".format(counted), flush=True)
+                "COUNT GATE FAILED for {}: {} -- "
+                "stopping before the next store".format(namespace, e))
+        print("    " + msg, flush=True)
 
     expected = len(records)
     del records, matrix
@@ -228,6 +255,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true",
                     help="actually write; without it this is a dry run")
+    ap.add_argument("--topup", action="store_true",
+                    help="incremental top-up into non-empty collections; the "
+                         "count gate checks growth instead of equality")
     ap.add_argument("--url", default=os.environ.get("QDRANT_URL", "http://127.0.0.1:6333"))
     ap.add_argument("--workspace", default=None,
                     help="defaults to WORKSPACE from .env, else '_'")
@@ -247,7 +277,8 @@ def main():
     client = QdrantClient(url=args.url, timeout=300)
     print("server    {}".format(client.info().version))
 
-    results = [migrate_store(client, ns, dim, model_name, workspace, args.apply)
+    results = [migrate_store(client, ns, dim, model_name, workspace, args.apply,
+                             topup=args.topup)
                for ns in ORDER]
 
     print("\n=== summary")

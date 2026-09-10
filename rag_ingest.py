@@ -254,6 +254,26 @@ async def periodic_cache_flush(rag, every=300):
             print(f"--- llm cache flush failed: {e}", flush=True)
 
 
+def build_rag(config, **lightrag_kwargs_overrides):
+    # LightRAG's core dataclass hardcodes vector_storage="NanoVectorDBStorage";
+    # LIGHTRAG_VECTOR_STORAGE is read by the API server ONLY. So the backend has
+    # to be passed explicitly here or the host ingest silently keeps writing
+    # nano JSON while the server serves from Qdrant.
+    lightrag_kwargs = dict(lightrag_kwargs_overrides)
+    vector_storage = ragbase.env_value("LIGHTRAG_VECTOR_STORAGE")
+    if vector_storage:
+        lightrag_kwargs.setdefault("vector_storage", vector_storage)
+        print(f"--- vector storage: {vector_storage}", flush=True)
+
+    return RAGAnything(
+        config=config,
+        llm_model_func=llm_model_func,
+        vision_model_func=vision_model_func,
+        embedding_func=embedding_func,
+        lightrag_kwargs=lightrag_kwargs,
+    )
+
+
 async def main(paths):
     config = RAGAnythingConfig(
         working_dir=WORKING_DIR,
@@ -263,23 +283,7 @@ async def main(paths):
         enable_table_processing=True,
         enable_equation_processing=True,
     )
-    # LightRAG's core dataclass hardcodes vector_storage="NanoVectorDBStorage";
-    # LIGHTRAG_VECTOR_STORAGE is read by the API server ONLY. So the backend has
-    # to be passed explicitly here or the host ingest silently keeps writing
-    # nano JSON while the server serves from Qdrant.
-    lightrag_kwargs = {}
-    vector_storage = ragbase.env_value("LIGHTRAG_VECTOR_STORAGE")
-    if vector_storage:
-        lightrag_kwargs["vector_storage"] = vector_storage
-        print(f"--- vector storage: {vector_storage}", flush=True)
-
-    rag = RAGAnything(
-        config=config,
-        llm_model_func=llm_model_func,
-        vision_model_func=vision_model_func,
-        embedding_func=embedding_func,
-        lightrag_kwargs=lightrag_kwargs,
-    )
+    rag = build_rag(config)
     flusher = asyncio.create_task(periodic_cache_flush(rag))
     try:
         for path in paths:

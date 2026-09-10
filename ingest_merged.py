@@ -209,6 +209,8 @@ def parse_one(slice_pdf_path, out_json):
         enable_table_processing=True,
         enable_equation_processing=True,
     )
+    # parse-only: no lightrag_kwargs, no vector writes, runs in an isolated
+    # subprocess -- deliberately does not go through base.build_rag
     rag = RAGAnything(
         config=cfg,
         llm_model_func=base.llm_model_func,
@@ -267,7 +269,7 @@ def merge_content_lists(parts):
 
 def clean_items(items, min_ratio=0.6):
     """Drop furniture and repair hyphenation. Returns (items, stats)."""
-    stats = {"junk_items": 0, "furniture_lines": 0, "rejoined": 0, "stripped_forms": []}
+    stats = {"junk_items": 0, "empty_items": 0, "furniture_lines": 0, "rejoined": 0, "stripped_forms": []}
 
     kept = [it for it in items if it.get("type") not in JUNK_TYPES]
     stats["junk_items"] = len(items) - len(kept)
@@ -295,6 +297,8 @@ def clean_items(items, min_ratio=0.6):
         if text:
             it = dict(it, text=text)
             out.append(it)
+        else:
+            stats["empty_items"] += 1
 
     # cross-item hyphenation: separate_content joins text items with "\n\n", so a
     # word broken at a page/slice boundary stays broken unless rejoined here
@@ -312,6 +316,10 @@ def clean_items(items, min_ratio=0.6):
             continue
         fixed.append(it)
 
+    stats["unaccounted"] = (
+        len(items) - len(fixed)
+        - (stats["junk_items"] + stats["empty_items"] + stats["rejoined"])
+    )
     stats["stripped_forms"] = sorted(running)
     return fixed, stats
 
@@ -325,7 +333,7 @@ def insert_merged(content_list, source_pdf):
     import asyncio
 
     import rag_ingest as base
-    from raganything import RAGAnything, RAGAnythingConfig
+    from raganything import RAGAnythingConfig
 
     cfg = RAGAnythingConfig(
         working_dir=base.WORKING_DIR,
@@ -335,12 +343,7 @@ def insert_merged(content_list, source_pdf):
         enable_table_processing=True,
         enable_equation_processing=True,
     )
-    rag = RAGAnything(
-        config=cfg,
-        llm_model_func=base.llm_model_func,
-        vision_model_func=base.vision_model_func,
-        embedding_func=base.embedding_func,
-    )
+    rag = base.build_rag(cfg)
 
     async def run():
         flusher = asyncio.create_task(base.periodic_cache_flush(rag))
@@ -415,9 +418,10 @@ def main(argv=None):
     merged = merge_content_lists(parts)
     cleaned, stats = clean_items(merged)
     print(f"      {len(merged)} items -> {len(cleaned)} after cleanup")
-    print(f"      dropped {stats['junk_items']} junk items, "
+    extra = f", unaccounted {stats['unaccounted']}" if stats.get("unaccounted") else ""
+    print(f"      dropped {stats['junk_items']} junk items, {stats['empty_items']} empty, "
           f"{stats['furniture_lines']} furniture lines, "
-          f"rejoined {stats['rejoined']} hyphenated breaks")
+          f"rejoined {stats['rejoined']} hyphenated breaks{extra}")
     (work / "merged_content_list.json").write_text(
         json.dumps(cleaned, ensure_ascii=False), encoding="utf-8"
     )
@@ -498,6 +502,24 @@ def self_test():
     tbl = {"type": "table", "table_body": "<table>..</table>", "page_idx": 2}
     out, _ = clean_items([tbl])
     assert out == [tbl]
+
+    # a text item that cleans to empty is counted, not silently dropped
+    items = [{"type": "text", "text": "   \n  \n", "page_idx": 0},
+             {"type": "text", "text": "42", "page_idx": 1}]
+    out, st = clean_items(items, min_ratio=0.99)
+    assert len(out) == 0, out
+    assert st["empty_items"] == 2, st
+
+    # balance invariant: every dropped item is accounted for, nothing unexplained
+    items = [
+        {"type": "page_number", "text": "7", "page_idx": 0},
+        {"type": "text", "text": "split across a break-", "page_idx": 0},
+        {"type": "text", "text": "word.", "page_idx": 1},
+        {"type": "text", "text": "kept.", "page_idx": 1},
+    ]
+    out, st = clean_items(items, min_ratio=0.99)
+    assert len(items) - len(out) == st["junk_items"] + st["empty_items"] + st["rejoined"]
+    assert st["unaccounted"] == 0
 
     print("self-test OK")
     return 0

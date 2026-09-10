@@ -145,6 +145,30 @@ def test_batching_respects_caps():
     print("ok  batched respects both the point-count and payload-size caps")
 
 
+def test_check_count_gate():
+    # normal mode: exact match only
+    m.check_count_gate(100, 0, 100, topup=False)
+    try:
+        m.check_count_gate(99, 0, 100, topup=False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("normal-mode gate did not reject a short count")
+
+    # topup mode: growth into a non-empty collection is fine, with overwrites
+    msg = m.check_count_gate(1050, 1000, 100, topup=True)
+    assert "50 of 100" in msg, msg
+
+    # topup mode: count going backwards must be rejected
+    try:
+        m.check_count_gate(900, 1000, 100, topup=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("topup gate did not reject a count that went backwards")
+    print("ok  check_count_gate accepts growth, rejects equality miss and backwards count")
+
+
 def main():
     test_point_id_matches_lightrag()
     test_collection_name()
@@ -152,6 +176,7 @@ def main():
     test_load_and_alignment()
     test_payload_shape()
     test_batching_respects_caps()
+    test_check_count_gate()
     print("\nOK: migrate_nano_to_qdrant self-check passed")
     return 0
 
