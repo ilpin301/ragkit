@@ -36,10 +36,12 @@ process arguments — German filenames (`Stäben`, `Verzerrungszustand`) mangle
 through the ANSI codepage. `-Merged` ingests one source PDF as a single merged
 document and takes exactly one list entry.
 
-`ingest.ps1` owns the whole run: guards, `docker compose stop`, the environment,
+`ingest.ps1` owns the whole run: guards, `docker compose stop lightrag`, the environment,
 the entrypoint, the `check_vectors.py` gate, the log, the sound, and
-`docker compose start`. It runs every guard **before** stopping the container,
-so a rejected invocation can never leave a base's server down.
+`docker compose start lightrag`. It runs every guard **before** stopping the container,
+so a rejected invocation can never leave a base's server down. Only the `lightrag` service is
+stopped — a base's `qdrant` is a server the host ingest talks to, so stopping the whole compose
+project would break the ingest the stop exists to protect.
 
 ## Scripts
 
@@ -53,9 +55,14 @@ so a rejected invocation can never leave a base's server down.
 | `ragbase.py` | resolves `RAGBASE_ROOT` into root/storage/data + reads `<root>\lightrag\.env` |
 | `rag_ingest.py` | RAG-Anything + MinerU ingest; carries the three monkey-patches and the periodic LLM-cache flush |
 | `ingest_merged.py` | slices a large PDF, parses each slice, inserts **one** merged document |
-| `check_vectors.py` | post-ingest NaN/zero-vector gate; dim read from `EMBEDDING_DIM`, never defaulted |
+| `check_vectors.py` | post-ingest NaN/zero-vector gate, backend-aware (nano's `vdb_*.json` or the Qdrant collections); dim read from `EMBEDDING_DIM`, never defaulted |
 | `ingest_triage.py` | classifies why a failed run failed |
-| `repairs\repair_vdb.py` | re-embeds graph nodes/edges and chunks with no vector |
+| `check_ingest_wiring.py` | asserts host and server agree on vector backend and collection naming; exit 0 agree, 3 do not |
+| `migrate_nano_to_qdrant.py` | copies stored vectors from nano to Qdrant verbatim, smallest store first; dry run by default, `--apply` to write |
+| `verify_qdrant_recall.py` | recall@k against exact cosine from the nano matrix; run before deleting `vdb_*.json` |
+| `bench_vector_search.py` | times Qdrant vs. nano's brute-force scan on the same vectors |
+| `purge_query_cache.py` | drops cached query answers from the LLM response cache, keeps `default:*` and `<mode>:keywords`; dry run by default |
+| `repairs\repair_vdb.py` | re-embeds graph nodes/edges and chunks with no vector — nano only |
 | `repairs\cleanup_processed_slices.ps1` | deletes slice PDFs whose whole family is processed |
 
 The python scripts take their base from the `RAGBASE_ROOT` environment
@@ -66,6 +73,36 @@ than guess a path.
 `chunks_count` field nothing reads at query time, so the drift is cosmetic. It
 stays in PCM_RAG. `cleanup_leftovers.ps1`, `delete_dup_stub.ps1` and
 `refresh_drive_snapshot.ps1` are one-off PCM incident scripts and stayed there too.
+
+## Vector backend
+
+`LIGHTRAG_VECTOR_STORAGE` in a base's `lightrag\.env` selects where vectors live:
+
+| Value | Where vectors live |
+|---|---|
+| `NanoVectorDBStorage` | `vdb_chunks.json`, `vdb_entities.json`, `vdb_relationships.json` in `rag_storage` |
+| `QdrantVectorDBStorage` | a per-base `qdrant` compose service, storage in the docker named volume `<project>_qdrant_storage` |
+
+Why Qdrant: nano rewrites all three `vdb_*.json` files on every document flush — roughly 1536 MB
+per document on a base PCM_RAG's size — while Qdrant writes only the rows that changed. On a box
+with an unfixed RAM fault, the time spent writing is the window in which a crash destroys the
+store. Measured on PCM_RAG (126,750 vectors): recall@10 vs. exact cosine 1.0000/0.9980/0.9970,
+retrieval identical to the nano baseline on a 10-question set, search 17.4 ms -> 8.5 ms on the
+93,852-row store.
+
+`new_base.ps1` writes `LIGHTRAG_VECTOR_STORAGE=NanoVectorDBStorage` for a new base and derives
+`QDRANT_PORT = 6333 + (PORT - 9621)` plus `QDRANT_URL`, applied on both the template path and
+`-From <existing base>` — a base seeded from a Qdrant base would otherwise inherit its
+`QDRANT_PORT` and the two containers would fight over one host port.
+
+An empty, new base can be flipped to `QdrantVectorDBStorage` in `.env` before its first ingest,
+nothing else to do. An existing base must run `migrate_nano_to_qdrant.py` first — flipping the
+value alone points the server at an empty index and queries return `[no-context]`. See
+`OPERATING.md`.
+
+Host-side URLs always use `127.0.0.1`, never `localhost`: Windows resolves `localhost` to `::1`
+first and docker publishes on `127.0.0.1` only, so the failed IPv6 attempt costs about 2 s per
+request (measured 2055 ms -> 8.2 ms per search).
 
 ## Adding a machine
 

@@ -20,7 +20,7 @@ $Store     = Join-Path $LrDir 'data\rag_storage'
 $Ledger    = Join-Path $LrDir 'INGESTED_SOURCES.txt'
 $Project   = Get-EnvValue 'COMPOSE_PROJECT_NAME'
 if (-not $Project) { throw "COMPOSE_PROJECT_NAME is missing from $EnvF - without it docker compose derives the project from the folder name ('lightrag' for every base) and resolves another base's container" }
-$Container = (docker compose --project-directory $LrDir ps -a --format json | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+$Container = (docker compose --project-directory $LrDir ps -a --format json lightrag | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name   # name the service: a Qdrant base has more than one container
 $Kit       = $env:RAGKIT_HOME
 if (-not $Kit) { throw "RAGKIT_HOME is not set - run ragkit\bootstrap.ps1, then restart this session" }
 . (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA, $DRIVE

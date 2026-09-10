@@ -30,12 +30,14 @@ function Get-EnvValue($k) {
 $Port      = Get-EnvValue 'PORT'
 $Key       = Get-EnvValue 'LIGHTRAG_API_KEY'      # server auth; never hardcode it
 $Dim       = Get-EnvValue 'EMBEDDING_DIM'
+$VecStore  = (Get-EnvValue 'LIGHTRAG_VECTOR_STORAGE')      # nano or QdrantVectorDBStorage - Step 6 differs
 $Api       = "http://localhost:$Port"
 $Store     = Join-Path $LrDir 'data\rag_storage'
 $Ledger    = Join-Path $LrDir 'INGESTED_SOURCES.txt'
 $Project   = Get-EnvValue 'COMPOSE_PROJECT_NAME'
 if (-not $Project) { throw "COMPOSE_PROJECT_NAME is missing from $EnvF - without it docker compose derives the project from the folder name ('lightrag' for every base) and resolves another base's container" }
-$Container = (docker compose --project-directory $LrDir ps -a --format json | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+$Container = (docker compose --project-directory $LrDir ps -a --format json lightrag | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+# name the service: a Qdrant base has more than one container (lightrag + qdrant)
 $Kit       = $env:RAGKIT_HOME
 if (-not $Kit) { throw "RAGKIT_HOME is not set - run ragkit\bootstrap.ps1, then restart this session" }
 . (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA
@@ -59,6 +61,16 @@ curl.exe -s http://localhost:11434/api/version    # Ollama MUST be up before any
 Get-ChildItem (Join-Path $LrDir 'LOG\ingest_run.log') -ErrorAction SilentlyContinue
 Get-Content (Join-Path $LrDir 'LOG\LAST_FAILURE.txt') -ErrorAction SilentlyContinue
 ```
+
+On a Qdrant base (`$VecStore` = `QdrantVectorDBStorage`), also confirm the qdrant container is up
+before launching — the ingest writes to it:
+
+```powershell
+curl.exe -s (Get-EnvValue 'QDRANT_URL')/healthz
+```
+
+`ingest.ps1` stops only the `lightrag` service (`docker compose stop lightrag`), not the whole
+project, so qdrant is expected to stay running through the launch.
 
 - `ingest_run.log` already present + a live python process => a run is IN FLIGHT. Do not start
   another; attach to it at Step 4 instead.
@@ -263,29 +275,52 @@ run, not just ones that "look" like they had trouble.
 
 **`EXITCODE=0` is not evidence that anything was ingested** — see the no-op cases above. Only the
 deltas below prove work happened. Record the baseline BEFORE launching (node and edge counts on the
-graphml, plus the three vdb file sizes and mtimes).
+graphml, plus — on nano — the three vdb file sizes and mtimes, or — on Qdrant (`$VecStore` =
+`QdrantVectorDBStorage`) — the per-collection point counts; a `check_vectors.py` run before the launch
+is the cheapest way to record those).
 
 1. **Doc count delta** — `/documents` count before vs after; every new file PROCESSED, none
    FAILED/handling.
 2. **Graph node delta** — the node count in `graph_chunk_entity_relation.graphml` grew:
    `grep -c '<node ' lightrag/data/rag_storage/graph_chunk_entity_relation.graphml`
-3. **Vector sanity** — `vdb_chunks.json`, `vdb_entities.json` and `vdb_relationships.json` all exist,
-   have mtimes AFTER the run start, and GREW. Byte-identical sizes = the run did nothing. Missing or
-   stale vdb files mean queries return `[no-context]`; the run did not finish cleanly.
-   Then run the checker — mtime and size say nothing about POISONED vectors:
+3. **Vector sanity** — backend-dependent.
+
+   On nano: `vdb_chunks.json`, `vdb_entities.json` and `vdb_relationships.json` all exist, have
+   mtimes AFTER the run start, and GREW. Byte-identical sizes = the run did nothing. Missing or stale
+   vdb files mean queries return `[no-context]`; the run did not finish cleanly.
+
+   On Qdrant: there are no vdb_*.json files to check — if any are still present they are stale
+   leftovers from before the migration and prove nothing. The equivalent delta is the per-collection
+   point count growing.
+
+   Either way, run the checker next — file mtime/size and raw point counts say nothing about
+   POISONED vectors:
 
    ```powershell
    $env:NO_PROXY='*'; $env:RAGBASE_ROOT=$Root; & $Py (Join-Path $Kit 'check_vectors.py')
    ```
 
-   Exit `0` = healthy, `3` = problems. One line per store: row count, matrix row count, nonfinite
-   count, zero count. A corrupt embedding model returns all-zero vectors; normalizing those yields
-   NaN, and NaN poisons the WHOLE nano-vectordb matrix at load time — retrieval then silently returns
-   nothing while the ingest still exits 0. It also catches data/matrix row misalignment. The dimension
-   comes from `EMBEDDING_DIM` in the base's `.env` and is never defaulted. `ingest.ps1` runs this
-   itself on the success path and folds a non-zero result into `EXITCODE`, so a poisoned store KEEPS
-   its log and plays the failure wav. The manual run above is for ad-hoc checks and for verifying a
-   repair.
+   Exit `0` = healthy, `3` = problems. `check_vectors.py` is backend-aware. On nano: one line per
+   store with row count, matrix row count, nonfinite count, zero count. A corrupt embedding model
+   returns all-zero vectors; normalizing those yields NaN, and NaN poisons the WHOLE nano-vectordb
+   matrix at load time — retrieval then silently returns nothing while the ingest still exits 0. It
+   also catches data/matrix row misalignment. On Qdrant: each collection is checked for existing,
+   green status, and non-empty, a 512-point sample is checked for NaN/all-zero and for the right
+   dimension, and the chunks collection point count is cross-checked against
+   `kv_store_text_chunks.json` — the only count still on disk, which is what exposes a
+   half-finished migration. The qdrant container must be UP for this to run. The dimension comes from
+   `EMBEDDING_DIM` in the base's `.env` and is never defaulted. `ingest.ps1` runs this itself on the
+   success path and folds a non-zero result into `EXITCODE`, so a poisoned store KEEPS its log and
+   plays the failure wav. The manual run above is for ad-hoc checks and for verifying a repair.
+   **On a Qdrant base, also run `check_ingest_wiring.py` once after any `.env` or backend change.**
+   Two silent failure modes produce a run that looks perfect while the store the server serves from
+   never changes: LightRAG's core dataclass hardcodes `vector_storage="NanoVectorDBStorage"` and only
+   the API server reads `LIGHTRAG_VECTOR_STORAGE`, so the host ingest can keep writing nano JSON while
+   the server serves from Qdrant; and `EmbeddingFunc.model_name` feeds the collection suffix, so the
+   host can write `lightrag_vdb_entities` while the server reads `lightrag_vdb_entities_bge_m3_1024d`.
+   `check_ingest_wiring.py` asserts both, plus that the resolved collection names exist on the server.
+   Exit `0` = host and server agree, `3` = they do not. It embeds nothing, calls no LLM, writes
+   nothing.
 4. **One targeted query** per ingested doc via `lightrag-query`, asking something only that document
    answers. The answer must cite it.
 5. **Error-correction pass (mandatory)** — grep the archived log for VLM/multimodal loss, not just

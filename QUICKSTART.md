@@ -56,6 +56,12 @@ them the `.env` gets a placeholder and the script warns.
 | `-ApiKey` | LLM provider key |
 | `-Start` | `docker compose up -d` and wait for `/health` |
 
+A new base starts on `NanoVectorDBStorage`. If it will hold more than a few documents, set
+`LIGHTRAG_VECTOR_STORAGE=QdrantVectorDBStorage` in its `lightrag\.env` before the first ingest —
+that is the whole switch while the base is empty: `new_base.ps1` has already written the base's
+own `QDRANT_PORT`/`QDRANT_URL`, and the compose file already ships the `qdrant` service. Switching
+after documents exist means a migration — see `OPERATING.md`.
+
 ## Use it
 
 1. Drop PDFs into `<BASE>\IN\`.

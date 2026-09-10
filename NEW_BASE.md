@@ -12,6 +12,8 @@ A folder containing:
 - `IN\` — incoming source documents
 - `lightrag\INGESTED_SOURCES.txt` — the ingest ledger
 - `LOG\` — created by the launcher
+- a `qdrant` compose service and its named docker volume, present when the base uses
+  `LIGHTRAG_VECTOR_STORAGE=QdrantVectorDBStorage`
 
 No base holds ingest scripts or skills. All tooling lives in ragkit (`%RAGKIT_HOME%`), one copy
 for every base on the machine.
@@ -44,7 +46,9 @@ cases it does not fit.
 
 1. **Create `<BASE>\lightrag`.** Copy `template\docker-compose.yml` into it. A full clone of
    hkuds/lightrag is only needed if the base must vendor its own `lightrag\lightrag\` package —
-   the shipped compose pulls `ghcr.io/hkuds/lightrag:latest`.
+   the shipped compose pulls `ghcr.io/hkuds/lightrag:latest`. The shipped compose also brings up a
+   `qdrant` service; its storage is a named docker volume, never a bind mount onto a Windows drive —
+   Qdrant needs real local-fs fsync/mmap semantics that drvfs does not provide.
 
 2. **Write `.env`** — copy `template\env.template` or an existing base's file and change exactly
    three values:
@@ -63,6 +67,11 @@ cases it does not fit.
      values and must not be conflated.
    - `EMBEDDING_MODEL` and `EMBEDDING_DIM` can never change after the first ingest — existing
      vectors become incompatible.
+   - `LIGHTRAG_VECTOR_STORAGE` (default `NanoVectorDBStorage`) and `QDRANT_PORT`/`QDRANT_URL` must
+     be unique per base on the machine — `new_base.ps1` derives them as `6333 + (PORT - 9621)`; a
+     hand-built base must pick them by hand. Flipping `LIGHTRAG_VECTOR_STORAGE` on a base that
+     already has documents needs `migrate_nano_to_qdrant.py` first (see `OPERATING.md`); on a
+     brand-new empty base it is safe on its own.
 
 3. **No compose edit needed.** The shipped compose maps the host port from `.env`
    (`${PORT:-9621}:9621`).
@@ -80,7 +89,9 @@ cases it does not fit.
    run one hybrid query, then clear with `DELETE /documents`.
 
 8. **Backup**: `rag_sync.ps1 push` writes `<DRIVE>\<BASE>\rag_storage.tgz`, where `$DRIVE` comes
-   from the kit's `machine.ps1`.
+   from the kit's `machine.ps1`. On a Qdrant base, `push` also snapshots the collections into
+   `lightrag\data\qdrant_snapshots\` and tars them alongside `rag_storage` — the vectors live in a
+   docker volume, not under `rag_storage`.
 
 ## Rotating the server key
 

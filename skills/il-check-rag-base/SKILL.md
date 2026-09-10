@@ -31,7 +31,8 @@ $Store     = Join-Path $LrDir 'data\rag_storage'
 $Ledger    = Join-Path $LrDir 'INGESTED_SOURCES.txt'
 $Project   = Get-EnvValue 'COMPOSE_PROJECT_NAME'
 if (-not $Project) { throw "COMPOSE_PROJECT_NAME is missing from $EnvF - without it docker compose derives the project from the folder name ('lightrag' for every base) and resolves another base's container" }
-$Container = (docker compose --project-directory $LrDir ps -a --format json | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+$Container = (docker compose --project-directory $LrDir ps -a --format json lightrag | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+# name the service: a Qdrant base has more than one container (lightrag + qdrant)
 $Kit       = $env:RAGKIT_HOME
 if (-not $Kit) { throw "RAGKIT_HOME is not set - run ragkit\bootstrap.ps1, then restart this session" }
 . (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA, $DRIVE
@@ -84,23 +85,32 @@ one invariant, is told **read-only, propose nothing, fix nothing**, and returns 
 {"invariant":"A","severity":"critical|warning|info","findings":[{"what":"...","evidence":"...","count":N}]}
 ```
 
-- **A — orphaned vectors.** Every id in `vdb_chunks.json` / `vdb_entities.json` /
-  `vdb_relationships.json` must trace to a live parent in `kv_store_text_chunks.json` /
-  `kv_store_full_entities.json` / `kv_store_full_relations.json`. Report ids with no parent, and the
-  reverse (parents with no vector).
-  Complementary second probe, also required:
+- **A — orphaned vectors.** Backend-dependent probe.
+
+  On nano: every id in `vdb_chunks.json` / `vdb_entities.json` / `vdb_relationships.json` must trace
+  to a live parent in `kv_store_text_chunks.json` / `kv_store_full_entities.json` /
+  `kv_store_full_relations.json`. Report ids with no parent, and the reverse (parents with no vector).
+
+  On Qdrant: there is no vdb_*.json to diff — scroll the collection point ids instead (via the base's
+  `QDRANT_URL`) and run the same two-way trace against `kv_store_text_chunks.json` /
+  `kv_store_full_entities.json` / `kv_store_full_relations.json`. If `vdb_*.json` files are still
+  present on a Qdrant base they are stale migration leftovers, not the source of truth — do not diff
+  against them; report their presence as an `info` finding instead.
+
+  Complementary second probe, also required on either backend:
 
   ```powershell
   $env:NO_PROXY='*'; $env:RAGBASE_ROOT=$Root; & $Py (Join-Path $Kit 'check_vectors.py')
   ```
 
-  Exit `0` = healthy, `3` = problems; one line per store with row count, matrix row count, nonfinite
-  count and zero count. The two probes see different damage and neither replaces the other: the
-  set-difference above finds records **missing** a vector or **stale** vectors whose parent is gone;
-  `check_vectors.py` finds vectors that **exist but are poisoned** (NaN / all-zero) or a matrix
-  **misaligned** with the record list. A corrupt embedding model returns all-zero vectors,
-  normalizing yields NaN, and one NaN poisons the whole nano-vectordb matrix at load time — retrieval
-  then silently returns nothing while every id still traces to a live parent. Run both.
+  Exit `0` = healthy, `3` = problems. The two probes see different damage and neither replaces the
+  other: the set-difference above finds records **missing** a vector or **stale** vectors whose
+  parent is gone; `check_vectors.py` finds vectors that **exist but are poisoned** (NaN / all-zero) or
+  misaligned with the record list. On nano this is a matrix row count/nonfinite/zero-count check per
+  store: a corrupt embedding model returns all-zero vectors, normalizing yields NaN, and one NaN
+  poisons the whole nano-vectordb matrix at load time — retrieval then silently returns nothing while
+  every id still traces to a live parent. On Qdrant it samples points per collection for NaN/all-zero
+  and dimension instead of scanning a matrix, and needs the qdrant container up. Run both.
 - **B — stuck / broken doc status.** In `kv_store_doc_status.json` (container STOPPED — see Step 0):
   anything in `handling`, `pending`, `processing`, or `failed`; every `dup-*` stub; docs present in
   `doc_status` but absent from `kv_store_full_docs.json` (and vice versa). Also diff the doc count in
@@ -132,14 +142,16 @@ a different base.
 
 Give each agent the concrete file paths and the venv python from Discovery. Big JSON stores (the vdb
 files run to hundreds of MB) must be streamed or read with `ijson` / a targeted `python -c` — never
-cat into context.
+cat into context. On a Qdrant base the vector data is not on disk at all — query the collections
+through `QDRANT_URL` and never scroll a whole collection into context.
 
 ## Step 2 — reconcile
 
 As coordinator, merge the six JSON payloads into ONE markdown report ranked by severity:
 
-- `critical` — real data loss or an unqueryable store: missing vdb files, docs in the backup but not
-  live, genuine un-ingested page ranges, zero-chunk docs.
+- `critical` — real data loss or an unqueryable store: a missing or empty vector store (missing vdb
+  files on nano, a missing/empty/not-green collection on Qdrant), docs in the backup but not live,
+  genuine un-ingested page ranges, zero-chunk docs.
 - `warning` — self-inflicted but harmless-to-queries: stuck `handling` rows, `dup-*` stubs, orphaned
   vectors, outlier chunk ratios.
 - `info` — cosmetic: leftover slices, stale logs, skipped checks.
@@ -177,8 +189,9 @@ corruption or crash wreckage when a document was recently deleted; rank it `warn
 that a delete happened.
 
 **Do not write a new repair script for it.** The kit already ships `repairs\repair_vdb.py`, which
-defaults to a dry run and writes `.bak` files for all three stores before touching anything. Point the
-user at it instead:
+defaults to a dry run and writes `.bak` files for all three stores before touching anything. It is
+**nano-only** — it imports `NanoVectorDB` and rewrites `vdb_*.json` directly — and must not be offered
+as a repair on a Qdrant base. Point the user at it instead, on nano:
 
 ```powershell
 $env:NO_PROXY='*'; $env:RAGBASE_ROOT=$Root

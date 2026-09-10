@@ -48,6 +48,73 @@ make the retry free.
 Per-minute backoff does not help; capping simultaneous VLM calls (semaphore of 2) does. "openai" in
 the log is the python client library used as a compatible transport, not the service.
 
+## Vector backend
+
+`LIGHTRAG_VECTOR_STORAGE` in a base's `lightrag\.env` selects the backend. `NanoVectorDBStorage`
+keeps vectors in `vdb_chunks.json`, `vdb_entities.json` and `vdb_relationships.json` inside
+`rag_storage`. `QdrantVectorDBStorage` keeps them in a per-base `qdrant` compose service, storage
+in the docker named volume `<project>_qdrant_storage`. Both live bases run Qdrant.
+
+Why: nano rewrites all three `vdb_*.json` files on every document flush — roughly 1536 MB per
+document on a base PCM_RAG's size. Qdrant writes only the rows that changed. On a box with an
+unfixed RAM fault, the time spent writing is the window in which a crash destroys the store.
+
+`ingest.ps1` stops only the `lightrag` service (`docker compose stop lightrag` / `start lightrag`).
+A vector backend is a server the host ingest talks to, so stopping the whole compose project would
+break the ingest the stop exists to protect. `qdrant` must be up for an ingest, and for
+`check_vectors.py` on a Qdrant base.
+
+Host-side URLs always use `127.0.0.1`, never `localhost`: Windows resolves `localhost` to `::1`
+first and docker publishes on `127.0.0.1` only, so the failed IPv6 attempt costs about 2 s per
+request (measured 2055 ms -> 8.2 ms per search). From inside compose, the container reaches it as
+`http://qdrant:6333`.
+
+Two silent wiring failure modes, neither produces an error or a warning:
+
+1. LightRAG's core dataclass hardcodes `vector_storage="NanoVectorDBStorage"`, and
+   `LIGHTRAG_VECTOR_STORAGE` is read by the API server only. `rag_ingest.py` forwards it
+   explicitly — without that, host ingest keeps writing nano JSON while the server serves from
+   Qdrant.
+2. `EmbeddingFunc.model_name` feeds the vector-DB collection suffix. Omit it and the host writes
+   `lightrag_vdb_entities` while the server reads `lightrag_vdb_entities_bge_m3_1024d`.
+
+`check_ingest_wiring.py` asserts both, and that the resolved collection names actually exist on
+the server. It embeds nothing, calls no LLM, writes nothing. Run it after any `.env` or backend
+change:
+
+```powershell
+$env:NO_PROXY='*'; $env:RAGBASE_ROOT=$Root; & $Py (Join-Path $Kit 'check_ingest_wiring.py')
+```
+
+Exit 0 = host and server agree, 3 = they do not.
+
+`repairs\repair_vdb.py` is nano only — it imports `NanoVectorDB` and rewrites `vdb_*.json` directly.
+On a Qdrant base it repairs nothing, and the orphaned-entity-vector sweep after a delete has no kit
+tool yet.
+
+### Migrating an existing base to Qdrant
+
+a. Stop only `lightrag`, make sure `qdrant` is up — the migration reads the nano store off disk and
+   writes to the Qdrant server, neither needs the LightRAG API.
+b. `migrate_nano_to_qdrant.py` dry run — see the point counts before writing anything.
+c. `migrate_nano_to_qdrant.py --apply`. Stores go smallest first (chunks, entities,
+   relationships) with a point-count assert between them, so a crash costs at most one store; point
+   ids are a deterministic hash of the record id, so a crashed run is recovered by just re-running
+   it.
+d. `verify_qdrant_recall.py` before deleting anything — its ground truth is computed from the nano
+   matrix, so it must run while `vdb_*.json` still exists. `bench_vector_search.py` optionally, for
+   the same reason.
+e. Set `LIGHTRAG_VECTOR_STORAGE=QdrantVectorDBStorage` in `.env` (append-only edit, per this repo's
+   rule), then `check_ingest_wiring.py`.
+f. `purge_query_cache.py --apply` with the container stopped. It drops cached `<mode>:query`
+   answers only — it keeps `default:*` (entity/relationship extraction, real LLM spend per
+   document) and `<mode>:keywords`, because keyword extraction is a non-deterministic LLM call on
+   the question text and dropping it would make a before/after comparison measure keyword drift
+   instead of the index.
+g. Bring `lightrag` back up, run `check_vectors.py` and one real query.
+h. Only now delete the `vdb_*.json` files. Stale ones are worse than absent — anything that still
+   reads them reports a healthy store nothing queries any more.
+
 ## Verifying — EXITCODE=0 is not proof
 
 The exit code describes the python process, not the embedding backend. An ingest can exit 0, report
@@ -55,8 +122,10 @@ a correct chunk count and a `processed` status while every vector it wrote is Na
 similarity for the whole base, with no error anywhere. Check all four:
 
 1. `EXITCODE=0` in the log.
-2. `check_vectors.py` exits 0 — rows == matrix rows, 0 non-finite, 0 zero. Its dimension comes from
-   `EMBEDDING_DIM` and is never defaulted.
+2. `check_vectors.py` exits 0. On nano it compares rows to matrix rows, 0 non-finite, 0 zero. On
+   Qdrant it checks the collections exist, are green and non-empty, samples vectors for NaN/all-zero,
+   and cross-checks the chunks collection point count against `kv_store_text_chunks.json`. Its
+   dimension comes from `EMBEDDING_DIM` and is never defaulted.
 3. The document is listed in `/documents` as `processed`.
 4. One real query returns topically correct content with citations.
 5. **The mandatory error-correction pass** (see below). `EXITCODE=0` proves neither working
@@ -177,6 +246,13 @@ Check `/openapi.json` before guessing any route shape.
 
 - `rag_sync.ps1 push|pull` moves the whole store to and from `<DRIVE>\<BASE>\rag_storage.tgz`.
   `pull` is a full overwrite, not a merge.
+- On a Qdrant base the vectors are in a docker volume, not under `rag_storage`. `push` starts
+  `qdrant` if needed, waits for `/healthz`, snapshots every collection through Qdrant's own
+  snapshot API into `lightrag\data\qdrant_snapshots\`, deletes the server-side copy (or the volume
+  grows by a full store every push), and tars `qdrant_snapshots` alongside `rag_storage` — tarring
+  live segment files is exactly the inconsistency the snapshot endpoint exists to avoid. `pull`
+  refuses an archive with no `qdrant_snapshots\` on a Qdrant base rather than coming back up with an
+  empty vector index.
 - Run it from a **native PowerShell**, never a `pwsh` launched out of Git Bash: that inherits
   `/usr/bin` on PATH, so `tar` resolves to the msys build, which parses `C:\...` as `host:path` and
   tries to open an SSH connection. The same applies to any command handing a Windows absolute path
@@ -192,7 +268,8 @@ Check `/openapi.json` before guessing any route shape.
   container then crash-loops on a `ParseError` at line 1, column 0. Detect with a NUL-byte scan of
   those two files, not a JSON parse of the directory. Recover by extracting the snapshot into a
   *staging* directory, validating it there (graphml parses, rows == matrix rows, 0 orphans in both
-  directions), and only then swapping directories.
+  directions), and only then swapping directories. On a Qdrant base only the graphml is exposed
+  this way — the host no longer rewrites multi-hundred-MB JSON vector files.
 
 ## Embeddings gone bad
 
@@ -205,8 +282,10 @@ that have to be re-embedded from each record's stored content.
 After repairing vectors, purge the poisoned answers: in `kv_store_llm_response_cache.json` delete
 only the mode-prefixed keys (`hybrid:`, `local:`, `global:`, `naive:`, `mix:`) and keep every
 `default:` key — those are the entity extractions, worth hours of LLM calls, while a keyword
-extraction costs one cheap call to regenerate. Re-test the **exact** query string that failed; a
-paraphrase misses the cache and hides the problem.
+extraction costs one cheap call to regenerate. `purge_query_cache.py` does exactly this filtering
+(dry run by default) and also keeps `<mode>:keywords` — safe to keep, since keyword extraction is
+a pure function of the question text. Re-test the **exact** query string that failed; a paraphrase
+misses the cache and hides the problem.
 
 ## Repo hygiene
 

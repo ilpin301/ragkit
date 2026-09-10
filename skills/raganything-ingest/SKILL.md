@@ -34,7 +34,8 @@ $Store     = Join-Path $LrDir 'data\rag_storage'
 $Ledger    = Join-Path $LrDir 'INGESTED_SOURCES.txt'
 $Project   = Get-EnvValue 'COMPOSE_PROJECT_NAME'
 if (-not $Project) { throw "COMPOSE_PROJECT_NAME is missing from $EnvF - without it docker compose derives the project from the folder name ('lightrag' for every base) and resolves another base's container" }
-$Container = (docker compose --project-directory $LrDir ps -a --format json | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+$Container = (docker compose --project-directory $LrDir ps -a --format json lightrag | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1).Name
+# name the service: a Qdrant base has more than one container (lightrag + qdrant)
 $Kit       = $env:RAGKIT_HOME
 if (-not $Kit) { throw "RAGKIT_HOME is not set - run ragkit\bootstrap.ps1, then restart this session" }
 . (Join-Path $Kit 'machine.ps1')                  # $VENV, $HasCUDA
@@ -207,8 +208,11 @@ made the correction pass mandatory after every ingest in every base. The mandato
   full extraction again — so kill/restart and corrective re-ingest are cheap up to that point, not
   after.
 - Multimodal VLM descriptions may NOT hit cache — expect those to re-run.
-- **`vdb_*.json` only exist after a clean `EXITCODE=0` finish.** A killed run can leave them missing
-  or stale, and queries then return `[no-context]`. Fix: run to clean completion.
+- **On nano, `vdb_*.json` only exist after a clean `EXITCODE=0` finish.** A killed run can leave them
+  missing or stale, and queries then return `[no-context]`. On Qdrant there are no vdb files to check
+  — the equivalent damage is the collections ending up short of the documents the run claimed to
+  process, so the check is `check_vectors.py` plus the collection point counts, not file presence.
+  Fix either way: run to clean completion.
 - Killed runs leave `dup-*` FAILED stubs in doc status and can leave real docs stuck in `handling`.
   **Prefer deleting the partial doc over flipping its status.** Flipping `handling` -> `processed`
   marks a half-ingested document complete and its missing chunks never come back.
@@ -282,8 +286,13 @@ so the openai client defaults apply. Raising them would widen the outage a run c
 
 ## Sweep orphaned vectors after any delete
 
-`DELETE /documents/delete_document` strands entity vectors on every clean delete, not just after
-crashes — observed 278, 275, then 272 across three consecutive deletes, each exactly the
+`repairs\repair_vdb.py` is **nano-only** — it imports `NanoVectorDB` and rewrites `vdb_*.json`
+directly. On a Qdrant base it repairs nothing and must not be run as a "fix"; there is no kit tool yet
+for the post-delete orphaned-entity-vector sweep on Qdrant. `check_vectors.py` still reports the
+collections on Qdrant, but do not invent a Qdrant repair procedure.
+
+On nano, `DELETE /documents/delete_document` strands entity vectors on every clean delete, not just
+after crashes — observed 278, 275, then 272 across three consecutive deletes, each exactly the
 `vdb_entities` minus graph-node gap. With the container stopped:
 
 ```powershell
