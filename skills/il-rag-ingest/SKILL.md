@@ -125,6 +125,25 @@ if you find one, it is not new; add it to the ledger instead of ingesting it.
 A file already PROCESSED is not new. A file in `FAILED` or stuck `handling` is a *repair* case, not a
 new ingest — say so and stop for the user's call.
 
+### ONE SOURCE PER RUN (mandatory, every base)
+
+If the new list holds more than one file, **do NOT put them all in one list file.** Ingest them
+**one at a time**, in a full Step 2 → Step 7 cycle per source: probe, slice if needed, launch,
+wait, verify all five, run the error-correction pass, then do the COMPLETE cleanup and bookkeeping
+(ledger, slice deletion, archived log, LLM cache, keepawake, background shells, project memory).
+Only when that source is finished and verified clean does the next one start.
+
+Report the queue up front (`3 new: A, B, C — ingesting one at a time, A first`), then one summary
+per source as it lands.
+
+A source that FAILS, or finishes with a nonzero permanent-loss count, STOPS the queue. Report it and
+wait for the user's call — do not move on to the next file and do not silently skip the broken one.
+
+Why: a batched run makes a failure unattributable (which source poisoned the graph?), and it makes
+the delete/re-ingest repair far more expensive, since deleting one document from a large store takes
+minutes and rewrites the graph. Slices of ONE source stay in ONE run — they are one document; this
+rule is about separate SOURCES.
+
 ## Step 2 — probe each new PDF (routing)
 
 Full image detection: `get_images()` alone MIS-ROUTES vector-figure PDFs. Always check
@@ -172,8 +191,9 @@ no renamed-slice-family problem in the ledger.
 
 ## Step 4 — launch detached, then wait silently
 
-Write this run's file list into a UTF-8 list file and hand it to the kit launcher. Never edit a
-launcher script, never pass bare path arguments, never run `rag_ingest.py` inline: the launcher owns
+Write this run's file list into a UTF-8 list file and hand it to the kit launcher. **One source per
+list file** — see ONE SOURCE PER RUN in Step 1; multiple entries are only ever the slices of a single
+source. Never edit a launcher script, never pass bare path arguments, never run `rag_ingest.py` inline: the launcher owns
 the guards, `docker compose stop`, the env block, the `EXITCODE=` marker, the `check_vectors.py` gate,
 the failure triage, the completion sound and `docker compose start`.
 
@@ -388,6 +408,9 @@ the input the correction pass re-checks after every corrective re-ingest.
 
 Emit ONE end-of-run summary: files ingested, the five verification numbers (including the
 permanent-loss count), anything skipped and why.
+
+Then, and only then, return to Step 2 for the next queued source. Cleanup is not deferrable to the
+end of the queue — each source is fully closed out before the next launch.
 
 **Always sweep orphaned vectors after a delete.** `DELETE /documents/delete_document` strands entity
 vectors that the graph no longer has, on clean deletes too. The procedure is in `raganything-ingest`.
