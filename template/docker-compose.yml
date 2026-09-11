@@ -25,7 +25,7 @@ services:
       # SECURITY: LIGHTRAG_API_KEY is set in .env by new_base.ps1 - without it
       # every endpoint on the published port is public.
       HOST: "0.0.0.0"
-      PORT: "9623"
+      PORT: "9621"
       # Core LightRAG defaults to NanoVectorDBStorage; only the API server reads
       # this. rag_ingest.py picks the same value up from .env separately.
       LIGHTRAG_VECTOR_STORAGE: "${LIGHTRAG_VECTOR_STORAGE:-NanoVectorDBStorage}"
