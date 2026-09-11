@@ -136,6 +136,39 @@ Only when that source is finished and verified clean does the next one start.
 Report the queue up front (`3 new: A, B, C — ingesting one at a time, A first`), then one summary
 per source as it lands.
 
+**Back up to Drive between sources.** The per-source cleanup is not done until `rag_sync.ps1 push`
+has run and reported success — that push is what makes the just-ingested document survivable, and it
+is far cheaper to redo one source than a whole queue. Only then does the next source launch.
+
+```powershell
+# Google Drive must be mounted first - J:\ is a virtual drive, it is absent when Drive is not running
+if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
+  $gdrive = Get-ChildItem 'C:\Program Files\Google\Drive File Stream' -Directory |
+            Sort-Object Name | Select-Object -Last 1
+  Start-Process (Join-Path $gdrive.FullName 'GoogleDriveFS.exe')
+}
+# wait for the mount, do not assume it is instant
+$deadline = (Get-Date).AddMinutes(3)
+while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+if (-not (Test-Path 'J:\My Drive')) { throw 'Google Drive did not mount - stop the queue and report' }
+& (Join-Path $Root 'rag_sync.ps1') push
+```
+
+Three traps here:
+
+- **Run it from native PowerShell, never the Bash tool.** Under Git Bash `tar` resolves to the msys
+  build, which reads `C:\...` as a remote host and dies with `Cannot connect to C: resolve failed`.
+  Git Bash also cannot see the `J:` mount at all, so an empty `ls J:` there is NOT evidence that
+  Drive is down — check from PowerShell.
+- **A missing `J:` means Drive is not running**, not that the backup is gone. Launch it, wait for the
+  mount, then push.
+- `rag_sync.ps1 push` stops the LightRAG container for the duration and restarts it if it was
+  running; on a Qdrant base it also exports a snapshot per collection into
+  `lightrag\data\qdrant_snapshots\` and tars it alongside `rag_storage`. A backup taken any other
+  way contains no vectors. Confirm the push printed its archive path before moving on.
+
+If the push FAILS, the queue stops — same as a failed ingest. Report and wait for the user's call.
+
 A source that FAILS, or finishes with a nonzero permanent-loss count, STOPS the queue. Report it and
 wait for the user's call — do not move on to the next file and do not silently skip the broken one.
 
@@ -409,8 +442,10 @@ the input the correction pass re-checks after every corrective re-ingest.
 Emit ONE end-of-run summary: files ingested, the five verification numbers (including the
 permanent-loss count), anything skipped and why.
 
-Then, and only then, return to Step 2 for the next queued source. Cleanup is not deferrable to the
-end of the queue — each source is fully closed out before the next launch.
+Then run `rag_sync.ps1 push` (launching Google Drive first if `J:` is not mounted — see ONE SOURCE
+PER RUN in Step 1) and confirm it succeeded. Only then return to Step 2 for the next queued source.
+Cleanup and Drive sync are not deferrable to the end of the queue — each source is fully closed out
+before the next launch.
 
 **Always sweep orphaned vectors after a delete.** `DELETE /documents/delete_document` strands entity
 vectors that the graph no longer has, on clean deletes too. The procedure is in `raganything-ingest`.
