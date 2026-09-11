@@ -1,4 +1,4 @@
-<#
+﻿<#
 Create a new LightRAG base. One command, one argument.
 
     .\new_base.ps1 -Name MECH_RAG [-Path <parent dir>] [-Port N]
@@ -104,9 +104,21 @@ if ($From) {
 # --- vector backend keys ----------------------------------------------------
 # Applied to BOTH paths on purpose. -From copies every key through untouched,
 # so a base seeded from a Qdrant base would inherit its QDRANT_PORT and the two
-# containers would fight over one host port. Derived from $Port, which is
-# already unique per base, so no extra scan is needed.
+# containers would fight over one host port. Derived from $Port, then checked
+# against the siblings and the live sockets: bases created before this
+# derivation existed picked their QDRANT_PORT by hand, so the derived value
+# can still land on one that is already taken (PCM_RAG holds 6333 on port 9622).
+$qdrantClaimed = @(Get-ChildItem -LiteralPath $Path -Directory -ErrorAction SilentlyContinue |
+  ForEach-Object { Join-Path $_.FullName 'lightrag\.env' } |
+  Where-Object { Test-Path -LiteralPath $_ } |
+  ForEach-Object { (Get-Content -LiteralPath $_ | Select-String '^QDRANT_PORT=' | Select-Object -First 1) } |
+  Where-Object { $_ } |
+  ForEach-Object { [int]($_.Line.Split('=', 2)[1].Trim()) })
 $qdrantPort = 6333 + ($Port - 9621)
+while ($qdrantClaimed -contains $qdrantPort -or -not (Test-PortFree $qdrantPort)) {
+  $qdrantPort++
+  if ($qdrantPort -gt 6433) { throw "new_base.ps1: no free Qdrant port in 6333-6433" }
+}
 $envText = $envText -replace '(?m)^QDRANT_PORT=.*$', "QDRANT_PORT=$qdrantPort"
 $envText = $envText -replace '(?m)^QDRANT_URL=.*$', "QDRANT_URL=http://127.0.0.1:$qdrantPort"
 if ($envText -notmatch '(?m)^QDRANT_PORT=') {
@@ -134,7 +146,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $baseLr 'INGESTED_SOURCES.txt'))) {
 }
 
 Write-Host "base:    $root"
-Write-Host "port:    $Port"
+Write-Host "port:    $Port   (qdrant $qdrantPort)"
 Write-Host "project: $project"
 Write-Host "api key: $serverKey   (X-API-Key header; also in lightrag\.env)"
 if (-not $ApiKey) {
