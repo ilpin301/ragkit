@@ -84,6 +84,19 @@ $env:MINERU_DEVICE_MODE = $(if ($HasCUDA) { 'cuda' } else { 'cpu' })
 $env:TIKTOKEN_CACHE_DIR = "$env:TEMP\data-gym-cache"
 $env:ZAI_API_KEY = $key
 $env:RAGBASE_ROOT = $Root
+# LightRAG reads its tuning knobs via os.getenv, but nothing exported the base's
+# .env into this process - ragbase.env_value() only reads the file - so a value
+# set there never reached the host ingest. Every run therefore used the default
+# LLM_TIMEOUT=240, which caps the extract worker at 480s (llm_timeout * 2). A
+# slow provider window then kills individual multimodal items: each is dropped
+# whole while the run still exits 0 with a healthy-looking store. 2026-09-12:
+# three equations lost from one CHEM_RAG source exactly this way.
+$env:LLM_TIMEOUT = '600'   # worker cap 1200s; a value in .env overrides it below
+foreach ($k in @('LLM_TIMEOUT', 'MAX_ASYNC', 'MAX_ASYNC_LLM', 'EXTRACT_MAX_ASYNC_LLM',
+                 'VLM_MAX_ASYNC_LLM', 'EMBEDDING_FUNC_MAX_ASYNC', 'EMBEDDING_TIMEOUT')) {
+  $v = Get-EnvValue $k
+  if ($v) { Set-Item -Path "env:$k" -Value $v }
+}
 # Each base vendors its own lightrag\lightrag\ package, which shadowed the venv
 # only because the old launcher ran from the clone root. Running from the kit
 # would silently swap in the venv's lightrag_hku -- a third library variant the
