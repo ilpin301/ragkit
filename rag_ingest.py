@@ -110,7 +110,7 @@ _NanoVectorDB.save = _streamed_nvdb_save
 
 ZAI_KEY = os.environ["ZAI_API_KEY"]
 BASE_URL = "https://api.z.ai/api/coding/paas/v4"
-LLM_MODEL = "glm-5.2"
+LLM_MODEL = "glm-5.3"
 VISION_MODEL = "glm-4.5v"
 WORKING_DIR = ragbase.STORAGE
 
