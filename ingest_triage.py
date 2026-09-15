@@ -26,7 +26,21 @@ RULES = [
     (r"ConnectionError|Connection refused|Max retries exceeded|Failed to establish", "ENDPOINT_UNREACHABLE",
      "Ollama or the LLM endpoint was down. Start it and re-run."),
     (r"KeyboardInterrupt", "INTERRUPTED", "Run was interrupted; just re-run."),
+    (r"ABORT: z\.ai quota", "LLM_QUOTA_STOP",
+     "The quota guard stopped the run before the window ran dry. Storages were flushed. "
+     "Wait for the window to reset (check BOTH TOKENS_LIMIT rows: number:5 is 5-hour, "
+     "number:1 is weekly), then re-run as-is - the LLM response cache replays free. "
+     "Do NOT delete kv_store_llm_response_cache.json."),
 ]
+
+# Positive exit codes the ingest chooses for itself, which outrank any log text.
+DELIBERATE_EXIT = {
+    17: ("LLM_QUOTA_STOP",
+         "The quota guard stopped the run before the window ran dry. Storages were flushed. "
+         "Wait for the window to reset (check BOTH TOKENS_LIMIT rows: number:5 is 5-hour, "
+         "number:1 is weekly), then re-run as-is - the LLM response cache replays free. "
+         "Do NOT delete kv_store_llm_response_cache.json."),
+}
 
 
 # Negative exit codes are NTSTATUS: the OS killed the interpreter. Nothing in the log text
@@ -50,6 +64,8 @@ def classify_exit(code):
     """Verdict from the process exit code, or None when the code carries no signal."""
     if code is None:
         return None
+    if code in DELIBERATE_EXIT:
+        return DELIBERATE_EXIT[code]
     if code in NATIVE_CRASH:
         return NATIVE_CRASH[code]
     if code < 0:

@@ -343,7 +343,7 @@ def insert_merged(content_list, source_pdf):
         enable_table_processing=True,
         enable_equation_processing=True,
     )
-    rag = base.build_rag(cfg)
+    rag = base._register_rag(base.build_rag(cfg))
 
     async def run():
         flusher = asyncio.create_task(base.periodic_cache_flush(rag))

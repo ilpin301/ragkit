@@ -8,6 +8,7 @@ then start it again after:  docker compose stop / docker compose start
 import asyncio
 import os
 import sys
+import time
 
 from raganything import RAGAnything, RAGAnythingConfig
 from lightrag.llm.openai import openai_complete_if_cache
@@ -130,6 +131,86 @@ _VLM_SEMAPHORE = asyncio.Semaphore(2)
 _zai_raw_complete = openai_complete_if_cache
 _ZAI_BACKOFF = (20, 45, 90, 150)
 
+# --- quota stop guard ------------------------------------------------------
+# Running a base dry is worse than stopping short: the document is left `handling`,
+# every in-flight multimodal item dies with a RetryError, and the repair costs a
+# delete/re-ingest cycle. Stop while there is still headroom and leave the LLM
+# response cache on disk so the relaunch replays free.
+# Read BOTH TOKENS_LIMIT rows: `number:5` is the 5-hour window, `number:1` is weekly.
+# Watching only the one z.ai names in its 1308 message is how the wrong counter gets
+# blamed.
+_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+_QUOTA_STOP_PCT = float(os.environ.get("ZAI_QUOTA_STOP_PCT", "98"))
+_QUOTA_POLL_SEC = float(os.environ.get("ZAI_QUOTA_POLL_SEC", "60"))
+_QUOTA_EXIT_CODE = 17
+_quota_checked_at = 0.0
+_ACTIVE_RAG = None
+
+
+def _quota_pct():
+    """Highest TOKENS_LIMIT percentage in use, or None if it cannot be read.
+
+    Fails OPEN on purpose: a flaky monitor endpoint must never kill a healthy
+    ingest. The guard only stops on a number it actually read.
+    """
+    try:
+        import httpx
+        # trust_env=False: this box's system proxy is SOCKS, and picking it up
+        # raises "Missing dependencies for SOCKS support" inside the run.
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            r = client.get(_QUOTA_URL, headers={"Authorization": ZAI_KEY})
+            rows = r.json()["data"]["limits"]
+        pcts = [row["percentage"] for row in rows if row.get("type") == "TOKENS_LIMIT"]
+        return max(pcts) if pcts else None
+    except Exception as exc:
+        print(f"WARNING: quota check failed ({exc}); continuing", flush=True)
+        return None
+
+
+async def _flush_everything():
+    """Best-effort persist of every storage that knows how to persist itself."""
+    lr = getattr(_ACTIVE_RAG, "lightrag", None)
+    if lr is None:
+        return
+    for store in list(vars(lr).values()):
+        cb = getattr(store, "index_done_callback", None)
+        if cb is None:
+            continue
+        try:
+            await cb()
+        except Exception as exc:
+            print(f"--- flush failed for {type(store).__name__}: {exc}", flush=True)
+
+
+async def _quota_stop(pct):
+    print(f"ABORT: z.ai quota at {pct}% (stop threshold {_QUOTA_STOP_PCT}%). "
+          f"Flushing to disk and stopping so the relaunch replays from cache.",
+          flush=True)
+    await _flush_everything()
+    print("ABORT: flush complete, exiting", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # ponytail: os._exit because a raise here gets swallowed by raganything's
+    # per-item handler and the run would grind on burning the last of the quota.
+    os._exit(_QUOTA_EXIT_CODE)
+
+
+async def _quota_guard():
+    global _quota_checked_at
+    now = time.monotonic()
+    if now - _quota_checked_at < _QUOTA_POLL_SEC:
+        return
+    _quota_checked_at = now
+    pct = _quota_pct()
+    if pct is not None and pct >= _QUOTA_STOP_PCT:
+        await _quota_stop(pct)
+
+
+def _is_usage_limit(exc):
+    """True for z.ai code 1308 - the window is spent, backing off will not help."""
+    return "1308" in str(exc)
+# --- end quota stop guard --------------------------------------------------
+
 
 def _is_rate_limit(exc):
     """True if exc is a 429, including one wrapped in tenacity's RetryError."""
@@ -146,10 +227,15 @@ def _is_rate_limit(exc):
 
 
 async def _complete_with_backoff(*args, **kwargs):
+    await _quota_guard()
     for delay in _ZAI_BACKOFF:
         try:
             return await _zai_raw_complete(*args, **kwargs)
         except Exception as exc:
+            if _is_usage_limit(exc):
+                # Window is spent. Sleeping the full backoff just delays the same
+                # failure and leaves less time to flush.
+                await _quota_stop(100)
             if not _is_rate_limit(exc):
                 raise
             print(f"WARNING: z.ai 429, sleeping {delay}s before retry", flush=True)
@@ -254,6 +340,13 @@ async def periodic_cache_flush(rag, every=300):
             print(f"--- llm cache flush failed: {e}", flush=True)
 
 
+def _register_rag(rag):
+    """Let the quota guard reach the live storages when it has to flush."""
+    global _ACTIVE_RAG
+    _ACTIVE_RAG = rag
+    return rag
+
+
 def build_rag(config, **lightrag_kwargs_overrides):
     # LightRAG's core dataclass hardcodes vector_storage="NanoVectorDBStorage";
     # LIGHTRAG_VECTOR_STORAGE is read by the API server ONLY. So the backend has
@@ -283,7 +376,13 @@ async def main(paths):
         enable_table_processing=True,
         enable_equation_processing=True,
     )
-    rag = build_rag(config)
+    rag = _register_rag(build_rag(config))
+    pct = _quota_pct()
+    if pct is not None and pct >= _QUOTA_STOP_PCT:
+        print(f"ABORT: z.ai quota already at {pct}% before start "
+              f"(threshold {_QUOTA_STOP_PCT}%); not registering any document.",
+              flush=True)
+        sys.exit(_QUOTA_EXIT_CODE)
     flusher = asyncio.create_task(periodic_cache_flush(rag))
     try:
         for path in paths:

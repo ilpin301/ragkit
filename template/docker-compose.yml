@@ -46,7 +46,7 @@ services:
       - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
     volumes:
       - qdrant_storage:/qdrant/storage
-    restart: unless-stopped
+    restart: "no"
 
 volumes:
   qdrant_storage:
