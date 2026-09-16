@@ -1,5 +1,8 @@
 """Self-check for the ingest quota stop guard. Run: python test_quota_guard.py"""
+import abc
 import asyncio
+import contextlib
+import io
 import os
 import sys
 
@@ -76,6 +79,44 @@ def test_1308_is_treated_as_usage_limit():
                     "'message': 'Usage limit reached for 5 hour'}}")
     assert base._is_usage_limit(exc)
     assert not base._is_usage_limit(Exception("code 1302 per-minute rate limit"))
+
+
+def test_flush_skips_storage_classes():
+    called = []
+
+    class LiveStore:
+        async def index_done_callback(self):
+            called.append("live")
+
+    class StoreClass(abc.ABC):
+        """A resolved storage CLASS, as found in vars(lr); its type is ABCMeta."""
+
+        async def index_done_callback(self):
+            called.append("class")
+
+    class FakeLR:
+        def __init__(self):
+            self.live = LiveStore()
+            self.resolved = StoreClass     # getattr yields the UNBOUND function
+            self.label = "JsonDocStatusStorage"
+            self.number = 42
+
+    class FakeRag:
+        lightrag = FakeLR()
+
+    orig = getattr(base, "_ACTIVE_RAG", None)
+    try:
+        base._ACTIVE_RAG = FakeRag()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            asyncio.run(base._flush_everything())
+        out = buf.getvalue()
+        # Calling index_done_callback on a class raised "missing 1 required
+        # positional argument: 'self'" on every quota abort before the guard.
+        assert called == ["live"], f"only live instances may flush, got {called}"
+        assert "flush failed" not in out, f"flush still errors: {out}"
+    finally:
+        base._ACTIVE_RAG = orig
 
 
 if __name__ == "__main__":
