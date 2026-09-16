@@ -173,6 +173,13 @@ async def _flush_everything():
     if lr is None:
         return
     for store in list(vars(lr).values()):
+        # vars(lr) holds resolved storage CLASSES next to the live instances.
+        # getattr on a class returns the unbound function, so calling it with no
+        # args raised "index_done_callback() missing 1 required positional
+        # argument: 'self'" on every quota abort - noise that would hide a real
+        # flush failure.
+        if isinstance(store, type):
+            continue
         cb = getattr(store, "index_done_callback", None)
         if cb is None:
             continue
