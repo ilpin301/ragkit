@@ -8,6 +8,16 @@
   and only then start the next. Never batch several sources into one list file - a failure then
   cannot be attributed and the delete/re-ingest repair costs minutes per document. Slices of ONE
   source still go in ONE run. A failed or lossy source STOPS the queue; report and wait.
+- **After each source, `rag_sync.ps1 push` before the next one launches.** The per-source cleanup is
+  not done until that push succeeds. If `J:` is missing, Google Drive is not running - start
+  `GoogleDriveFS.exe` (newest folder under `C:\Program Files\Google\Drive File Stream`), wait for
+  `J:\My Drive` to appear, then push. Native PowerShell only: under Git Bash `tar` resolves to the
+  msys build, which reads `C:\...` as a remote host and fails with `Cannot connect to C: resolve
+  failed`, and Git Bash cannot see the `J:` mount at all - an empty listing there is NOT evidence
+  that Drive is down. A failed push stops the queue, same as a failed ingest.
+- **Start `lightrag\keepawake.ps1` BEFORE any long run and kill it after**, or the box suspends
+  mid-run and the job dies. Confirm it registered with `powercfg /requests`, which must show
+  `SYSTEM: [PROCESS] ...pwsh.exe`; `None.` means the block is NOT active and the run must not start.
 - Always launch ingests via the ragkit launcher, detached, never inline:
   `& $env:RAGKIT_HOME\ingest.ps1 -Root <this base> -ListFile <utf8 list>`. It produces
   `lightrag\LOG\ingest_run.log`, which progress checks depend on, and it owns `docker compose`
@@ -47,9 +57,3 @@
   `check_vectors.py`, `ingest_triage.py` and the launcher are all under `$env:RAGKIT_HOME`.
   `lightrag\` here is a plain data directory, not a clone of hkuds/lightrag.
 - The store (`lightrag\data\rag_storage\`) is NOT in git. Never `git add -A` here.
-
-## Not set up yet
-`new_base.ps1` does not create `rag_sync.ps1` (Drive backup) or `keepawake.ps1` (blocks system sleep
-for the length of a long run). Copy both from a sibling base and fix their paths before the first
-real ingest: without them there is no backup at all, and the box can suspend mid-run and kill the
-job.

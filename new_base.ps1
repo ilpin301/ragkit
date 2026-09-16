@@ -157,6 +157,19 @@ if (-not (Test-Path -LiteralPath $claudeMd)) {
       Replace('__QDRANT_PORT__', "$qdrantPort"))
 }
 
+# Per-base helper scripts. keepawake is identical in every base, so it is copied;
+# rag_sync needs the base name for its $env:<NAME>_DRIVE override.
+$keepAwake = Join-Path $baseLr 'keepawake.ps1'
+if (-not (Test-Path -LiteralPath $keepAwake)) {
+  Copy-Item -LiteralPath (Join-Path $kit 'template\keepawake.ps1') -Destination $keepAwake
+}
+$ragSync = Join-Path $root 'rag_sync.ps1'
+if (-not (Test-Path -LiteralPath $ragSync)) {
+  Set-Content -LiteralPath $ragSync -Encoding UTF8 -Value (
+    (Get-Content -LiteralPath (Join-Path $kit 'template\rag_sync.ps1') -Encoding UTF8 -Raw).
+      Replace('__NAME__', $Name)) -NoNewline
+}
+
 Write-Host "base:    $root"
 Write-Host "port:    $Port   (qdrant $qdrantPort)"
 Write-Host "project: $project"
