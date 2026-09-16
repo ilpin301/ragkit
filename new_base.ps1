@@ -145,6 +145,18 @@ if (-not (Test-Path -LiteralPath (Join-Path $baseLr 'INGESTED_SOURCES.txt'))) {
   New-Item -ItemType File -Path (Join-Path $baseLr 'INGESTED_SOURCES.txt') | Out-Null
 }
 
+# The base's own rules file. Carries the cross-base ingest rules so a new base is
+# not blank; base-specific detail gets hand-written under '## This base'.
+$claudeMd = Join-Path $root 'CLAUDE.md'
+if (-not (Test-Path -LiteralPath $claudeMd)) {
+  Set-Content -LiteralPath $claudeMd -Encoding UTF8 -Value (
+    (Get-Content -LiteralPath (Join-Path $kit 'template\CLAUDE.md') -Encoding UTF8 -Raw).
+      Replace('__NAME__', $Name).
+      Replace('__PROJECT__', $project).
+      Replace('__PORT__', "$Port").
+      Replace('__QDRANT_PORT__', "$qdrantPort"))
+}
+
 Write-Host "base:    $root"
 Write-Host "port:    $Port   (qdrant $qdrantPort)"
 Write-Host "project: $project"
