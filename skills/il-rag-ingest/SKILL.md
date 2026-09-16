@@ -269,6 +269,26 @@ Expect 5 hits: the definition, plus a create_task/cancel pair in each of the two
 live the log prints `--- llm cache flushed to disk` every 5 minutes and the cache file's mtime
 advances.
 
+## The quota stop guard (automatic, all bases)
+
+`rag_ingest.py` polls z.ai's quota endpoint at most once every 60 s and stops the run when the
+worst `TOKENS_LIMIT` row reaches **98%** (`ZAI_QUOTA_STOP_PCT` to override, `ZAI_QUOTA_POLL_SEC`
+for the poll interval). It reads BOTH rows - `number:5` is the 5-hour window, `number:1` is
+weekly - because z.ai's `1308` message always names the 5-hour one even when weekly is the
+binding cap. It also trips immediately on a `1308` error instead of burning the 305 s backoff.
+
+On trip it flushes every storage that can persist itself, prints `ABORT: z.ai quota ...` and
+exits **17**, which `ingest_triage.py` reports as `LLM_QUOTA_STOP`. There is also a pre-flight
+check before the first document, so a doomed run exits without registering anything as
+`handling` - no delete/repair cycle needed.
+
+The guard **fails open**: if the quota endpoint is unreachable or returns junk, it logs a warning
+and the ingest continues. A flaky monitor must never kill a healthy run. Because both entry
+points route through `llm_model_func`/`vision_model_func`, this covers `rag_ingest.py` and
+`ingest_merged.py` on every base.
+
+Self-check: `python test_quota_guard.py` in `$env:RAGKIT_HOME`.
+
 ## Step 5 — on failure: triage once, then escalate
 
 `LAST_FAILURE.txt` already holds the verdict from `ingest_triage.py`. Known verdicts and the single
@@ -278,6 +298,7 @@ fix to attempt before escalating to the user:
 |---|---|
 | `MINERU_PARSE_FAILED` / `CUDA_OOM` / `HOST_OOM` | slice smaller (5-7 pages) and re-run |
 | `LLM_RATE_LIMIT` | wait, re-run as-is (resumable, caches replay); do NOT raise the VLM semaphore above 2 |
+| `LLM_QUOTA_STOP` | the quota guard stopped the run on purpose (exit 17) - storages were already flushed. Wait for the window, re-run as-is. NEVER delete `kv_store_llm_response_cache.json` here; it is what makes the relaunch cheap |
 | `ENDPOINT_UNREACHABLE` | start Ollama / make z.ai reachable, re-run |
 | `MULTIMODAL_SERIAL_FALLBACK` | net dropped mid-run — kill and relaunch, do NOT let the serial path grind |
 | `INTERRUPTED` | re-run as-is |
@@ -433,6 +454,13 @@ the input the correction pass re-checks after every corrective re-ingest.
 - delete the slice PDFs (`stem-NN-MM.pdf`); keep the source PDF. The kit has an idempotent,
   dry-run-by-default helper:
   `pwsh -File (Join-Path $Kit 'repairs\cleanup_processed_slices.ps1') -Root $Root` (add `-Apply`).
+- delete the source's parse artifacts: `lightrag\data\mineru_output\<source-stem>*` and
+  `lightrag\data\merged_ingest\<source-stem>\`, always **together**. `merged_ingest\<src>\parsed\*.json`
+  is the resume cache and its `img_path` entries point into `mineru_output`; deleting one without the
+  other leaves a parse cache pointing at missing images, and the resumed run then fails every image
+  caption while still exiting 0. Never delete either pair for a source still in flight or stuck
+  `handling` - keeping them is what lets a quota-stopped run skip MinerU entirely on relaunch. These are
+  the largest artifacts the pipeline leaves behind and nothing else removes them.
 - append the SOURCE filename (not the slices) to `$Ledger`; if any slice of it failed, add it as a
   commented PARTIAL entry naming the missing page range instead
 - update the base's ingest-state project memory with the new doc count/state — do this without asking
