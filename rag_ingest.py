@@ -6,6 +6,7 @@ IMPORTANT: stop the Docker LightRAG container before running (shared storage),
 then start it again after:  docker compose stop / docker compose start
 """
 import asyncio
+import hashlib
 import os
 import sys
 import time
@@ -266,7 +267,82 @@ async def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwar
     )
 
 
+# --- VLM caption cache --------------------------------------------------------
+# RAGAnything never caches modal_caption_func calls (raganything/modalprocessors.py
+# calls self.modal_caption_func raw at :943 image, :1138 table, :1326 equation,
+# :1498 generic), so a quota-killed run that resumes re-buys every image caption.
+# Append-only JSONL sidecar: crash-safe without rewriting the file, and it lives
+# inside rag_storage so rag_sync.ps1 push carries it and a pull restores it.
+# Key is safe to reuse across runs: MinerU image paths are content-addressed and
+# the caption prompt embeds the path, so the same image re-parses to the same key.
+_CAPTION_CACHE_PATH = os.path.join(WORKING_DIR, "vlm_caption_cache.jsonl")
+_caption_cache = None
+
+
+def _caption_key(prompt, system_prompt, image_data):
+    h = hashlib.sha256()
+    for part in (VISION_MODEL, system_prompt or "", prompt or "", image_data or ""):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def _caption_cache_load():
+    global _caption_cache
+    if _caption_cache is not None:
+        return _caption_cache
+    _caption_cache = {}
+    try:
+        with open(_CAPTION_CACHE_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except ValueError:
+                    continue  # truncated tail left by a killed run
+                _caption_cache[rec["k"]] = rec["v"]
+    except FileNotFoundError:
+        pass
+    print(f"--- vlm caption cache: {len(_caption_cache)} entries", flush=True)
+    return _caption_cache
+
+
+def _caption_cache_put(key, value):
+    _caption_cache[key] = value
+    with open(_CAPTION_CACHE_PATH, "a", encoding="utf-8") as f:
+        f.write(_json.dumps({"k": key, "v": value}, ensure_ascii=False) + "\n")
+
+
 async def vision_model_func(
+    prompt, system_prompt=None, history_messages=[], image_data=None, messages=None, **kwargs
+):
+    # Only the image_data branch is cached: that is the caption path the modal
+    # processors take. The `messages` branch is query-time multimodal enhancement
+    # and must stay live.
+    if not image_data:
+        return await _vision_model_uncached(
+            prompt, system_prompt, history_messages, image_data, messages, **kwargs
+        )
+    cache = _caption_cache_load()
+    key = _caption_key(prompt, system_prompt, image_data)
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    result = await _vision_model_uncached(
+        prompt, system_prompt, history_messages, image_data, messages, **kwargs
+    )
+    # ponytail: no in-flight dedupe and no cross-process lock. Two coroutines
+    # racing the same key just pay twice, and ingest_merged's parse subprocesses
+    # run one at a time. Add a lock only if concurrent bases ever share a store.
+    if isinstance(result, str) and result:
+        _caption_cache_put(key, result)
+    return result
+# --- end VLM caption cache ----------------------------------------------------
+
+
+async def _vision_model_uncached(
     prompt, system_prompt=None, history_messages=[], image_data=None, messages=None, **kwargs
 ):
     async with _VLM_SEMAPHORE:
