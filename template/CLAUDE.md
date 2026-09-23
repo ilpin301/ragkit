@@ -10,7 +10,7 @@
   source still go in ONE run. A failed or lossy source STOPS the queue; report and wait.
 - **After each source, `rag_sync.ps1 push` before the next one launches.** The per-source cleanup is
   not done until that push succeeds. If `J:` is missing, Google Drive is not running - start
-  `GoogleDriveFS.exe` (newest folder under `C:\Program Files\Google\Drive File Stream`), wait for
+  `GoogleDriveFS.exe` (newest version folder under `C:\Program Files\Google\Drive File Stream` that contains it - not `Drivers`, which sorts last by name), wait for
   `J:\My Drive` to appear, then push. Native PowerShell only: under Git Bash `tar` resolves to the
   msys build, which reads `C:\...` as a remote host and fails with `Cannot connect to C: resolve
   failed`, and Git Bash cannot see the `J:` mount at all - an empty listing there is NOT evidence

@@ -182,7 +182,8 @@ is far cheaper to redo one source than a whole queue. Only then does the next so
 # Google Drive must be mounted first - J:\ is a virtual drive, it is absent when Drive is not running
 if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
   $gdrive = Get-ChildItem 'C:\Program Files\Google\Drive File Stream' -Directory |
-            Sort-Object Name | Select-Object -Last 1
+            Where-Object { Test-Path (Join-Path $_.FullName 'GoogleDriveFS.exe') } |   # skip 'Drivers'
+            Sort-Object { [version]$_.Name } | Select-Object -Last 1
   Start-Process (Join-Path $gdrive.FullName 'GoogleDriveFS.exe')
 }
 # wait for the mount, do not assume it is instant
