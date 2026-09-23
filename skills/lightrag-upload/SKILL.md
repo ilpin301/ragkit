@@ -40,6 +40,12 @@ drive path into this skill or into anything it generates.
 
 If `lightrag\` is absent, stop and say so. Do not guess a base.
 
+## Preflight
+
+Docker Desktop must be up and the base's containers running. If `docker info` fails, start it yourself (`Start-Process "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"`), wait until `docker info` succeeds, then `docker compose --project-directory <base>\lightrag up -d` and wait for `/health` — do not ask. Full snippet: `il-rag-ingest` Step 0.
+
+Ollama (bge-m3 embeddings) must be up: `curl.exe -s http://127.0.0.1:11434/api/version`. If empty, start it yourself (`Start-Process ollama.exe -ArgumentList 'serve' -WindowStyle Hidden`, from `$env:LOCALAPPDATA\Programs\Ollama` if not on PATH) and wait until it answers — do not ask. Full snippet: `il-rag-ingest` Step 0.
+
 ## Upload
 
 ```powershell

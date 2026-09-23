@@ -312,7 +312,8 @@ is dropped whole, nothing partial or corrupt is written. Measured 0.12% (5 of 40
 ## Notes
 
 - First run downloads MinerU models (~a few GB) — slow once, cached after.
-- Ollama must be up before ANY ingest: `curl.exe -s http://localhost:11434/api/version`.
+- Docker Desktop must be up before ANY ingest (`docker info` succeeds). If it is down (`failed to connect to the docker API at npipe:...`), start it yourself (`Start-Process "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"`), wait until `docker info` succeeds, then `docker compose --project-directory <base>\lightrag up -d` (restart policy is disabled, containers do not auto-start) — do not stop to ask. Full snippet: `il-rag-ingest` Step 0.
+- Ollama must be up before ANY ingest: `curl.exe -s http://127.0.0.1:11434/api/version`. If it is down, start it yourself (`Start-Process ollama.exe -ArgumentList 'serve' -WindowStyle Hidden`, from `$env:LOCALAPPDATA\Programs\Ollama` if not on PATH), wait until it answers, then continue — do not stop to ask. The full snippet is in `il-rag-ingest` Step 0.
 - Verify afterwards with `lightrag-status` (documents should show PROCESSED with a realistic chunk
   count), then test one query.
 - Any python that prints extracted PDF text needs `PYTHONIOENCODING=utf-8`; the default cp1251 console

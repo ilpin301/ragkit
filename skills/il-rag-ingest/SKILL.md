@@ -55,12 +55,50 @@ Derived layout used below: source folder `$Root\IN\` (**ingest ONLY from here**)
 
 ## Step 0 — preflight
 
+**Docker down => start it yourself, do not ask.** `docker` failing with
+`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine` means Docker Desktop
+is not running (typical after a reboot). Start it, wait for the engine, then bring the base's containers
+up — the compose restart policy is disabled, so they do NOT come back on their own:
+
+```powershell
+docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+  Start-Process (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe')
+  $deadline = (Get-Date).AddMinutes(4)
+  do { Start-Sleep 5; docker info *> $null } until ($LASTEXITCODE -eq 0 -or (Get-Date) -gt $deadline)
+  if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop did not come up - stop and report' }
+}
+docker compose --project-directory $LrDir up -d     # no-op when already up; qdrant data lives in a named volume
+$deadline = (Get-Date).AddMinutes(3)
+while (-not (curl.exe -s "http://127.0.0.1:$Port/health" -H "X-API-Key: $Key") -and (Get-Date) -lt $deadline) { Start-Sleep 5 }
+```
+
+Only stop and report if the engine or `/health` still does not answer after the wait. Never run this
+while an ingest is in flight - the launcher owns `stop`/`start` of the lightrag service during a run.
+
 ```powershell
 curl.exe -s "$Api/health" -H "X-API-Key: $Key"
-curl.exe -s http://localhost:11434/api/version    # Ollama MUST be up before any ingest
+curl.exe -s http://127.0.0.1:11434/api/version    # Ollama MUST be up before any ingest
 Get-ChildItem (Join-Path $LrDir 'LOG\ingest_run.log') -ErrorAction SilentlyContinue
 Get-Content (Join-Path $LrDir 'LOG\LAST_FAILURE.txt') -ErrorAction SilentlyContinue
 ```
+
+**Ollama down => start it yourself, do not ask.** An empty reply from `/api/version` means Ollama is not
+running (typical after a reboot). Start it and wait for it, then continue the preflight:
+
+```powershell
+if (-not (curl.exe -s http://127.0.0.1:11434/api/version)) {
+  $ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
+  if (-not $ollama) { $ollama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe' }
+  Start-Process $ollama -ArgumentList 'serve' -WindowStyle Hidden
+  $deadline = (Get-Date).AddSeconds(90)
+  while (-not (curl.exe -s http://127.0.0.1:11434/api/version) -and (Get-Date) -lt $deadline) { Start-Sleep 3 }
+  if (-not (curl.exe -s http://127.0.0.1:11434/api/version)) { throw 'Ollama did not come up - stop and report' }
+}
+```
+
+Use `127.0.0.1`, not `localhost` (localhost tries `::1` first). Only stop and report if it still
+does not answer after the wait.
 
 On a Qdrant base (`$VecStore` = `QdrantVectorDBStorage`), also confirm the qdrant container is up
 before launching — the ingest writes to it:
@@ -299,7 +337,7 @@ fix to attempt before escalating to the user:
 | `MINERU_PARSE_FAILED` / `CUDA_OOM` / `HOST_OOM` | slice smaller (5-7 pages) and re-run |
 | `LLM_RATE_LIMIT` | wait, re-run as-is (resumable, caches replay); do NOT raise the VLM semaphore above 2 |
 | `LLM_QUOTA_STOP` | the quota guard stopped the run on purpose (exit 17) - storages were already flushed. Wait for the window, re-run as-is. NEVER delete `kv_store_llm_response_cache.json` here; it is what makes the relaunch cheap |
-| `ENDPOINT_UNREACHABLE` | start Ollama / make z.ai reachable, re-run |
+| `ENDPOINT_UNREACHABLE` | start Ollama yourself (Step 0 snippet) (Docker Desktop too, same Step 0) / make z.ai reachable, re-run |
 | `MULTIMODAL_SERIAL_FALLBACK` | net dropped mid-run — kill and relaunch, do NOT let the serial path grind |
 | `INTERRUPTED` | re-run as-is |
 | `UNKNOWN` | do NOT guess a fix — report the log tail and stop |
@@ -465,7 +503,7 @@ the input the correction pass re-checks after every corrective re-ingest.
   commented PARTIAL entry naming the missing page range instead
 - update the base's ingest-state project memory with the new doc count/state — do this without asking
 - `docker ps` to confirm the container came back up (the launcher runs `docker compose start`, which
-  fails silently if Docker Desktop is down)
+  fails silently if Docker Desktop is down) — if so, start it with the Step 0 Docker snippet.
 
 Emit ONE end-of-run summary: files ingested, the five verification numbers (including the
 permanent-loss count), anything skipped and why.
