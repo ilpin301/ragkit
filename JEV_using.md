@@ -46,3 +46,54 @@ Ask per retrieved chunk: "does this chunk help answer Q?" → keep if prob > thr
 - https://www.marktechpost.com/2026/09/19/typesafe-ai-releases-jev/
 - https://apimaster.ai/blog/jev-api
 - https://www.datacamp.com/blog/system-one-models-jev
+
+## Worked examples (illustrative)
+
+Decision shapes below are illustrative — check the real Jev API before implementing. Thresholds are starting guesses to tune.
+
+### Example 1 — Noisy retrieval, chunk filter
+- Question: "Which laser fluence caused grain coarsening?"
+- LightRAG hybrid returns 20 chunks.
+- Jev, per chunk: "Does this chunk help answer the question?" → `bool` + prob.
+- Result: 14 chunks prob > 0.6 (kept); 6 chunks about coarsening in general, from unrelated papers, prob < 0.2 (dropped).
+- Effect: GLM reads 14 chunks instead of 20 → cheaper prompt, no mixing of fluence values from unrelated papers.
+
+### Example 2 — Wide recall, then trim
+- Question: "List all reported PCM encapsulation methods."
+- Retrieve top_k = 60 (want nothing missed).
+- Jev keeps chunks prob > 0.7 → ~15 survive.
+- Effect: recall of a big top_k, prompt size of a small one.
+
+### Example 3 — VLM caption noise
+- Question: "What grain size was measured after annealing?"
+- Retrieved chunk: "Fig. 3: SEM image of sample B." (keyword match on "sample", no numbers)
+- Jev: relevant = false, prob 0.08 → dropped.
+- Chunk with table caption "Table 2: mean grain diameter 4.2 µm after 600 °C anneal" → relevant = true, prob 0.93 → kept.
+
+### Example 4 — "Not in the base" guard
+- Question: "What is the tensile strength of material Y?" (Y never ingested)
+- All 20 retrieved chunks score prob < 0.3.
+- Action: skip GLM, reply "No source in this base covers this." instead of an improvised answer.
+- Why it works: probabilities are calibrated, so "all low" is a trustworthy signal.
+
+### Example 5 — Single entry point, base routing
+- Question: "Latent heat of paraffin RT35?"
+- Jev: enum `PCM | MECH | CHEM | multiple` → `PCM` (0.95).
+- Action: query only port 9622.
+
+### Example 6 — Cross-domain question
+- Question: "How does PCM thermal expansion affect mechanical load on the housing?"
+- Jev → `multiple` (PCM 0.6, MECH 0.55).
+- Action: query 9622 and 9623, merge contexts, one GLM answer.
+
+### Example 7 — Query mode pick
+- "Melting point of compound X?" → `local` (specific entity fact).
+- "What degradation mechanisms appear across the corpus?" → `global` (corpus-wide themes).
+- "Compare encapsulation methods and their failure modes" → `hybrid`.
+- Effect: cheaper than always running `hybrid`, better fit per question.
+
+### Example 8 — Ingest triage
+- New PDF lands in shared IN/.
+- Jev on title + abstract: enum `PCM | MECH | CHEM | junk`.
+- prob ≥ 0.8 → auto-move to that base's IN/. prob < 0.8 → leave for user to decide.
+- "junk" (e.g. publisher flyer, table of contents only) → move to a reject folder, never ingest.
