@@ -217,8 +217,10 @@ made the correction pass mandatory after every ingest in every base. The mandato
 - Image AND text (table/equation/generic) captions are cached in `rag_storage\vlm_caption_cache.jsonl`
   (log line `--- vlm caption cache: N entries`), so a relaunch replays identical captions and the
   downstream multimodal entity extraction hits the LLM response cache. Before 2026-09-24 text
-  captions were uncached, differed on replay, and forced every multimodal extraction to re-run. Keep
-  the sidecar until the source is verified clean.
+  captions were uncached, differed on replay, and forced every multimodal extraction to re-run. The
+  sidecar is deleted together with the LLM response cache at cleanup, under the same gate
+  (`EXITCODE=0` + verification passed + error-correction pass reports zero permanent losses) — never
+  mid-source.
 - **On nano, `vdb_*.json` only exist after a clean `EXITCODE=0` finish.** A killed run can leave them
   missing or stale, and queries then return `[no-context]`. On Qdrant there are no vdb files to check
   — the equivalent damage is the collections ending up short of the documents the run claimed to
@@ -399,12 +401,13 @@ correction pass re-checks after every corrective re-ingest — it must survive u
 zero permanent losses, not merely until `EXITCODE=0`. On a FAILED or killed run, or a run still
 carrying a permanent loss, both the log and the shells must be KEPT for diagnosis.
 
-**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed
-AND the error-correction pass reports zero permanent losses:
+**Delete the LLM response cache and the VLM caption cache.** Only after `EXITCODE=0` AND every
+verification step has passed AND the error-correction pass reports zero permanent losses:
 
 ```powershell
 docker stop $Container     # never delete while the server holds its own in-memory copy
 Remove-Item (Join-Path $Store 'kv_store_llm_response_cache.json')
+Remove-Item (Join-Path $Store 'vlm_caption_cache.jsonl') -ErrorAction SilentlyContinue
 ```
 
 LightRAG recreates the file empty on the next run. This is deliberate, not housekeeping: the cache

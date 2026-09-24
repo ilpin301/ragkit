@@ -579,12 +579,13 @@ correction pass re-checks after every corrective re-ingest, so it must survive u
 reports zero permanent losses — not merely until `EXITCODE=0`. On a FAILED or killed run, or a run
 still carrying a permanent loss, both the log and the shells must be KEPT for diagnosis.
 
-**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed
-AND the error-correction pass reports zero permanent losses:
+**Delete the LLM response cache and the VLM caption cache.** Only after `EXITCODE=0` AND every
+verification step has passed AND the error-correction pass reports zero permanent losses:
 
 ```powershell
 docker stop $Container     # never delete while the server holds its own in-memory copy
 Remove-Item (Join-Path $Store 'kv_store_llm_response_cache.json')
+Remove-Item (Join-Path $Store 'vlm_caption_cache.jsonl') -ErrorAction SilentlyContinue
 ```
 
 LightRAG recreates the file empty on the next run. This is deliberate, not housekeeping: the cache

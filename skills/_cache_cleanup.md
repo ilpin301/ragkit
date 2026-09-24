@@ -1,10 +1,12 @@
 
-**Delete the LLM response cache.** Only after `EXITCODE=0` AND every verification step has passed
-AND the post-ingest error-correction pass reports a permanent-loss count of zero:
+**Delete the LLM response cache and the VLM caption cache.** Only after `EXITCODE=0` AND every
+verification step has passed AND the post-ingest error-correction pass reports a permanent-loss
+count of zero:
 
 ```powershell
 docker stop $Container     # never delete while the server holds its own in-memory copy
 Remove-Item (Join-Path $Store 'kv_store_llm_response_cache.json')
+Remove-Item (Join-Path $Store 'vlm_caption_cache.jsonl') -ErrorAction SilentlyContinue
 ```
 
 LightRAG recreates the file empty on the next run. This is deliberate, not housekeeping: the cache
@@ -37,6 +39,10 @@ skills.
 that makes the relaunch cheap — that is the whole point of [[project_ingest_cache_flush]]. Deleting
 early converts a 15-minute relaunch into a full re-extraction.
 
-`vlm_caption_cache.jsonl` (image + text captions, keyed by content hash) is NOT part of this
-LLM-cache cleanup and is not deleted with it; it stays small and makes any later relaunch replay
-identical captions.
+**`vlm_caption_cache.jsonl` (2026-09-24 decision):** deleted TOGETHER with the LLM response cache,
+under the same gate. Every caption it holds is already stored in `kv_store_text_chunks.json`
+(verified 227/227 on the Advances ingest) and already embedded/graphed, so once a source is
+verified the sidecar holds no unique data — its only use is replay within one source (kill/relaunch,
+serial fallback, correction pass), same as the LLM cache. Keeping it past that point would also let
+a later re-ingest replay a bad captured caption. Text-only bases never create this file, hence
+`-ErrorAction SilentlyContinue` above.
