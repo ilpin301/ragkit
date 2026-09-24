@@ -270,7 +270,12 @@ async def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwar
 # --- VLM caption cache --------------------------------------------------------
 # RAGAnything never caches modal_caption_func calls (raganything/modalprocessors.py
 # calls self.modal_caption_func raw at :943 image, :1138 table, :1326 equation,
-# :1498 generic), so a quota-killed run that resumes re-buys every image caption.
+# :1498 generic), so a quota-killed run that resumes re-buys every caption. Both
+# paths are cached here through the same sidecar: images via vision_model_func,
+# and table/equation/generic text captions via caption_llm_func. An uncached text
+# caption changes on replay, which changes the extraction prompt and misses the
+# extraction cache (observed 2026-09-24: serial fallback re-extracted every
+# table/footnote item while image items replayed free).
 # Append-only JSONL sidecar: crash-safe without rewriting the file, and it lives
 # inside rag_storage so rag_sync.ps1 push carries it and a pull restores it.
 # Key is safe to reuse across runs: MinerU image paths are content-addressed and
@@ -279,9 +284,9 @@ _CAPTION_CACHE_PATH = os.path.join(WORKING_DIR, "vlm_caption_cache.jsonl")
 _caption_cache = None
 
 
-def _caption_key(prompt, system_prompt, image_data):
+def _caption_key(prompt, system_prompt, image_data, model=VISION_MODEL):
     h = hashlib.sha256()
-    for part in (VISION_MODEL, system_prompt or "", prompt or "", image_data or ""):
+    for part in (model, system_prompt or "", prompt or "", image_data or ""):
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
     return h.hexdigest()
@@ -339,6 +344,40 @@ async def vision_model_func(
     if isinstance(result, str) and result:
         _caption_cache_put(key, result)
     return result
+
+
+async def caption_llm_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+    """Cached text-caption path for the table/equation/generic modal processors."""
+    # Anything beyond a bare (prompt, system_prompt) call is not a caption: stay live.
+    if history_messages or kwargs:
+        return await llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+    cache = _caption_cache_load()
+    key = _caption_key(prompt, system_prompt, None, model=LLM_MODEL)
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    result = await llm_model_func(prompt, system_prompt)
+    if isinstance(result, str) and result:
+        _caption_cache_put(key, result)
+    return result
+
+
+def _caption_func_for(func):
+    """Route RAG-Anything's text caption func through the cache; leave others alone."""
+    return caption_llm_func if func is llm_model_func else func
+
+
+# Workaround #5: RAG-Anything hands llm_model_func straight to the table/equation/
+# generic processors as modal_caption_func, bypassing every cache. Swap it at
+# construction time; LightRAG's own extraction/query calls still get the raw func.
+_orig_bmp_init = _mp.BaseModalProcessor.__init__
+
+
+def _bmp_init_cached(self, lightrag, modal_caption_func, *args, **kwargs):
+    _orig_bmp_init(self, lightrag, _caption_func_for(modal_caption_func), *args, **kwargs)
+
+
+_mp.BaseModalProcessor.__init__ = _bmp_init_cached
 # --- end VLM caption cache ----------------------------------------------------
 
 

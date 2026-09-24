@@ -36,3 +36,7 @@ skills.
 **Never delete it on failure, and never before verification.** A killed run's cache is the only thing
 that makes the relaunch cheap — that is the whole point of [[project_ingest_cache_flush]]. Deleting
 early converts a 15-minute relaunch into a full re-extraction.
+
+`vlm_caption_cache.jsonl` (image + text captions, keyed by content hash) is NOT part of this
+LLM-cache cleanup and is not deleted with it; it stays small and makes any later relaunch replay
+identical captions.

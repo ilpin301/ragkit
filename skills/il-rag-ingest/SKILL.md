@@ -370,6 +370,8 @@ large store (it rewrites the graph and the relationship vdb) — wait for `/heal
 `pipeline_busy=False` with a silent until-loop, verify the doc's chunks are gone from
 `kv_store_text_chunks.json` and that the graph counts DROPPED, then re-ingest. Re-ingesting reuses the
 same doc id (hashed from the file path), which is expected. See [[project_lightrag_delete_endpoint]].
+On a MinerU/RAG-Anything doc this also orphans its text-phase entities — see raganything-ingest's
+full_entities warning and prefer restoring the Drive backup over deleting.
 
 Also check for the rest of the wreckage a killed run leaves: other docs stuck in `handling`, and
 missing vdb files.
@@ -467,6 +469,9 @@ is the cheapest way to record those).
 
 Report the five numbers (four counts plus the permanent-loss count). Do not claim success without
 them.
+
+Also grep the archived log for `Worker timeout` — must be 0. Nonzero means the embedding flush
+timed out mid-run; see the serial-fallback section in `raganything-ingest`.
 
 **Never verify a deletion from `docker logs`** — the line scrolls out of the tail window and the
 waiter hangs forever. Verify from the store files:

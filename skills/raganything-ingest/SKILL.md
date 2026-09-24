@@ -143,17 +143,24 @@ the serial-fallback line below.
 
 ## rag_ingest.py contains critical patches — DO NOT regenerate the script
 
-`rag_ingest.py` carries 3 monkey-patches + a VLM semaphore that are REQUIRED (raganything 1.3.1 +
+`rag_ingest.py` carries 5 monkey-patches + a VLM semaphore that are REQUIRED (raganything 1.3.1 +
 lightrag-hku 1.5.4 compatibility):
 
 1. `asdict` -> `_build_global_config` redirect in `raganything.modalprocessors`
 2. `role_llm_funcs` mirrored into the LightRAG instance `__dict__`
 3. junk-content filter wrapping `separate_content` in BOTH `raganything.utils` and
    `raganything.processor` (drops page_number/header/footer — ~38% of multimodal items are junk otherwise)
-4. `_VLM_SEMAPHORE = asyncio.Semaphore(2)` — the z.ai coding endpoint has a CONCURRENCY limit
+4. nano-vectordb streamed save (`NanoVectorDB.save` patched to write the base64 matrix and JSON
+   incrementally instead of materializing the whole document in memory — peak heap ~9 MB instead of
+   multi-GB, the largest crash-window cut on a box with a RAM fault)
+5. text-caption cache — `raganything.modalprocessors.BaseModalProcessor.__init__` patched so the
+   table/equation/generic processors use the cached `caption_llm_func` instead of the uncached
+   `llm_model_func`, so a relaunch replays identical captions instead of missing the extraction
+   cache. Self-check: `test_caption_cache.py`. See [[project_text_caption_cache]].
+6. `_VLM_SEMAPHORE = asyncio.Semaphore(2)` — the z.ai coding endpoint has a CONCURRENCY limit
    (error 1305); do not raise it above 2
 
-Any edit must preserve all four. `requirements.txt` is pinned for the same reason — these patches hook
+Any edit must preserve all of them. `requirements.txt` is pinned for the same reason — these patches hook
 private call paths that a minor version bump can move silently.
 
 ## z.ai 429 behavior
@@ -207,7 +214,11 @@ made the correction pass mandatory after every ingest in every base. The mandato
   Once the correction pass IS clean and the cache is deleted, the next re-run of that document pays
   full extraction again — so kill/restart and corrective re-ingest are cheap up to that point, not
   after.
-- Multimodal VLM descriptions may NOT hit cache — expect those to re-run.
+- Image AND text (table/equation/generic) captions are cached in `rag_storage\vlm_caption_cache.jsonl`
+  (log line `--- vlm caption cache: N entries`), so a relaunch replays identical captions and the
+  downstream multimodal entity extraction hits the LLM response cache. Before 2026-09-24 text
+  captions were uncached, differed on replay, and forced every multimodal extraction to re-run. Keep
+  the sidecar until the source is verified clean.
 - **On nano, `vdb_*.json` only exist after a clean `EXITCODE=0` finish.** A killed run can leave them
   missing or stale, and queries then return `[no-context]`. On Qdrant there are no vdb files to check
   — the equivalent damage is the collections ending up short of the documents the run claimed to
@@ -233,6 +244,19 @@ Invoke-RestMethod "$Api/documents/delete_document" -Method Delete -Headers $h -B
 and LLM-rebuilds every entity shared with other documents. Expect ~6 minutes on a large store. Wait on
 `/health` -> `pipeline_busy=False` with a silent until-loop, never a chatty poller, and confirm the
 doc is gone from `/documents` before starting the ingest.
+
+**Warning — deleting a MinerU doc orphans its text-phase entities.** An upstream LightRAG bug
+(`merge_nodes_and_edges`) overwrites the doc's `full_entities`/`full_relations` with only the last
+batch instead of merging, and RAG-Anything's multimodal merge reuses the same doc_id, so
+`delete_document` on a MinerU doc leaves every text-phase entity orphaned in the graph (473 on
+2026-09-24; API entity delete costs ~23 s each). It also deletes only the chunks listed in
+`doc_status.chunks_list`, which a killed partial doc under-reports. To undo a just-ingested or
+partial MinerU source, prefer restoring the Drive backup pushed before it instead
+(`rag_sync.ps1 pull`; if pull fails on a directory lock, move `rag_storage`'s CONTENTS aside,
+`C:\Windows\System32\tar.exe -xzf` the tgz into `lightrag\data`, upload the Qdrant snapshots with
+`?priority=snapshot`), then copy `kv_store_llm_response_cache.json` and `vlm_caption_cache.jsonl`
+back from the aside copy so the relaunch replays from cache. See
+[[project_full_entities_overwrite_bug]] and [[project_rag_sync_pull_lock]].
 
 **Never verify a deletion from `docker logs`.** A waiter polling
 `docker logs --tail 200 ... | grep 'Deletion completed'` hangs forever if the container restarts,
@@ -273,6 +297,15 @@ curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' --max-time 15 https://api
 ```
 
 then kill the run, delete the partial `handling` doc, and relaunch to get the batch path back.
+
+A second trigger for the serial fallback: an embedding timeout at the end-of-batch vector flush.
+Signature lines: `Embedding func: Worker timeout ... after 60s`, `Error embedding pending vector ops
+(upserts=N)`, `index flush failed`, then `Falling back to individual multimodal processing` from
+item 1 above. Cause: LightRAG's worker cap is `EMBEDDING_TIMEOUT*2`, timed from worker start; Ollama
+runs `NUM_PARALLEL=1`, so queueing inside Ollama counts against it; a ~10k-relation flush with 8
+workers blew the 60 s default. The kit launcher now defaults `EMBEDDING_FUNC_MAX_ASYNC=2`,
+`EMBEDDING_TIMEOUT=120` (240 s cap), overridable from the base `.env`. Recovery is the same as the
+network case: kill, restore/delete the partial doc, relaunch.
 
 **Arm waiters on the fallback line, not only on `EXITCODE=`** — otherwise a waiter sits silently
 through the entire 12-hour crawl:

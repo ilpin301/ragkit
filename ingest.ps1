@@ -92,6 +92,17 @@ $env:RAGBASE_ROOT = $Root
 # whole while the run still exits 0 with a healthy-looking store. 2026-09-12:
 # three equations lost from one CHEM_RAG source exactly this way.
 $env:LLM_TIMEOUT = '600'   # worker cap 1200s; a value in .env overrides it below
+# Embeddings: every base embeds on local Ollama with OLLAMA_NUM_PARALLEL=1, which
+# serializes requests. LightRAG's embedding worker timeout (EMBEDDING_TIMEOUT * 2,
+# default 60s) starts when a worker sends its request, so with the default 8 workers
+# the time a batch spends queued inside Ollama counts against it; time queued in
+# LightRAG's own priority queue does not. 2026-09-24: a merged source's end-of-batch
+# flush embedded entities (3009) + relationships (9903) + chunks (243) at once, 8
+# chunk batches passed 60s, the chunks flush failed and all 243 multimodal items fell
+# back to serial reprocessing. 2 workers still keep Ollama saturated but leave the
+# backlog in the untimed queue; the longer timeout covers one batch of long chunks.
+$env:EMBEDDING_FUNC_MAX_ASYNC = '2'
+$env:EMBEDDING_TIMEOUT = '120'   # worker cap 240s; a value in .env overrides it below
 foreach ($k in @('LLM_TIMEOUT', 'MAX_ASYNC', 'MAX_ASYNC_LLM', 'EXTRACT_MAX_ASYNC_LLM',
                  'VLM_MAX_ASYNC_LLM', 'EMBEDDING_FUNC_MAX_ASYNC', 'EMBEDDING_TIMEOUT')) {
   $v = Get-EnvValue $k
