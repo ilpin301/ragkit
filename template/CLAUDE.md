@@ -15,6 +15,11 @@
   msys build, which reads `C:\...` as a remote host and fails with `Cannot connect to C: resolve
   failed`, and Git Bash cannot see the `J:` mount at all - an empty listing there is NOT evidence
   that Drive is down. A failed push stops the queue, same as a failed ingest.
+- **Start Google Drive at the START of a run** (not right before the push) so it warms up while the ingest
+  runs. Before `rag_sync.ps1 push`, if `GoogleDriveFS` has been up < 5 min, wait until it has been up 5 min.
+  Why: 2026-09-29 a cold-started Drive (~1 min before the push) made the `Copy-Item` overwrite of
+  `rag_storage.tgz` on the streaming mount block >4 min while Drive fetched the old ~1 GB archive; warm
+  pushes do not download. Evidence is correlation, cause not proven.
 - **Start `lightrag\keepawake.ps1` BEFORE any long run and kill it after**, or the box suspends
   mid-run and the job dies. Confirm it registered with `powercfg /requests`, which must show
   `SYSTEM: [PROCESS] ...pwsh.exe`; `None.` means the block is NOT active and the run must not start.

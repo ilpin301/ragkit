@@ -76,6 +76,23 @@ while (-not (curl.exe -s "http://127.0.0.1:$Port/health" -H "X-API-Key: $Key") -
 Only stop and report if the engine or `/health` still does not answer after the wait. Never run this
 while an ingest is in flight - the launcher owns `stop`/`start` of the lightrag service during a run.
 
+**Start Google Drive now, at the START of the run - not right before the push.** It warms up while
+the ingest runs. If `GoogleDriveFS` is not running, launch it (same lookup as the Step 1 push block:
+newest version folder under `C:\Program Files\Google\Drive File Stream` that contains
+`GoogleDriveFS.exe`, not `Drivers`), then wait for `J:\My Drive` (max 3 min):
+
+```powershell
+if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
+  $gdrive = Get-ChildItem 'C:\Program Files\Google\Drive File Stream' -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName 'GoogleDriveFS.exe') } |
+            Sort-Object { [version]$_.Name } | Select-Object -Last 1
+  Start-Process (Join-Path $gdrive.FullName 'GoogleDriveFS.exe')
+}
+$deadline = (Get-Date).AddMinutes(3)
+while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+```
+
+
 ```powershell
 curl.exe -s "$Api/health" -H "X-API-Key: $Key"
 curl.exe -s http://127.0.0.1:11434/api/version    # Ollama MUST be up before any ingest
@@ -190,8 +207,18 @@ if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
 $deadline = (Get-Date).AddMinutes(3)
 while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
 if (-not (Test-Path 'J:\My Drive')) { throw 'Google Drive did not mount - stop the queue and report' }
+# Drive must have been running >= 5 min before the push (see the why below)
+$gd = Get-Process GoogleDriveFS -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1
+$wait = 300 - ((Get-Date) - $gd.StartTime).TotalSeconds
+if ($wait -gt 0) { Start-Sleep -Seconds ([int][math]::Ceiling($wait)) }
 & (Join-Path $Root 'rag_sync.ps1') push
 ```
+
+Why the warm-up: 2026-09-29, Drive cold-started ~1 min before a push; the overwrite (`Copy-Item` onto
+the existing `rag_storage.tgz` on the streaming mount) blocked >4 min in `drive_fs.txt` (`Slow operation
+AsyncDokanCreate`) while Drive fetched the old ~1 GB archive down first. Warm pushes (Drive already
+running, file cached) do not download. Evidence is correlation, cause not proven; the push itself was
+still correct. The Step 1 start-Drive fallback stays: Drive may have died mid-run.
 
 Three traps here:
 
