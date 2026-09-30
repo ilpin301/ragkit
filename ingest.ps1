@@ -2,14 +2,19 @@
 ragkit universal ingest launcher.
 
     ingest.ps1 -Root <base dir> -ListFile <utf8 list of PDFs> [-Merged] [-Pages N]
+    ingest.ps1 -Root <base dir> -DescFile <json {name: {old, new}}>
 
 <base dir> is any RAG base: a folder containing lightrag\ with a .env and a
 docker-compose. Nothing about a specific base is baked in here -- root, port,
 container, API key and embedding dim are all discovered at runtime.
 
--ListFile is mandatory and always UTF-8. Paths are never passed as bare process
-arguments: German filenames (Staeben, Verzerrungszustand) mangle through the
-ANSI codepage.
+Exactly one of -ListFile / -DescFile. -ListFile is always UTF-8. Paths are never
+passed as bare process arguments: German filenames (Staeben, Verzerrungszustand)
+mangle through the ANSI codepage.
+
+-DescFile applies a batch of entity-description edits (enricher --collect output)
+through apply_descriptions.py instead of rag_ingest.py: one graphml write, one
+embed flush. An empty file exits 0 before the container is touched.
 
 Run it detached, so the run survives the caller:
     Start-Process pwsh -ArgumentList '-NoProfile','-File','<kit>\ingest.ps1',
@@ -17,7 +22,8 @@ Run it detached, so the run survives the caller:
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Root,
-  [Parameter(Mandatory = $true)][string]$ListFile,
+  [string]$ListFile,
+  [string]$DescFile,
   [switch]$Merged,
   [int]$Pages = 10
 )
@@ -43,15 +49,31 @@ $baseLr = Join-Path $Root 'lightrag'
 $envFile = Join-Path $baseLr '.env'
 if (-not (Test-Path -LiteralPath $envFile)) { throw "ingest.ps1: $envFile not found - -Root must point at a RAG base" }
 
-if (-not (Test-Path -LiteralPath $ListFile)) { throw "ingest.ps1: list file not found: $ListFile" }
-$pdfs = @(Get-Content -LiteralPath $ListFile -Encoding UTF8 |
-          ForEach-Object { $_.Trim() } |
-          Where-Object { $_ -and -not $_.StartsWith('#') })
-if ($pdfs.Count -eq 0) { throw "ingest.ps1: list file is empty: $ListFile" }
-$missing = @($pdfs | Where-Object { -not (Test-Path -LiteralPath $_) })
-if ($missing) { throw "ingest.ps1: unresolvable entries in list file: $($missing -join ', ')" }
-if ($Merged -and $pdfs.Count -gt 1) {
-  throw "ingest.ps1: -Merged takes exactly one source PDF, got $($pdfs.Count). Run it once per source."
+if ([bool]$ListFile -eq [bool]$DescFile) { throw "ingest.ps1: pass exactly one of -ListFile / -DescFile" }
+$pdfs = @()
+$descCount = 0
+if ($DescFile) {
+  if ($Merged) { throw "ingest.ps1: -Merged only applies to -ListFile" }
+  if (-not (Test-Path -LiteralPath $DescFile)) { throw "ingest.ps1: desc file not found: $DescFile" }
+  $DescFile = (Resolve-Path -LiteralPath $DescFile).Path
+  try {
+    $desc = Get-Content -LiteralPath $DescFile -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+  } catch { throw "ingest.ps1: desc file is not valid JSON: $DescFile ($($_.Exception.Message))" }
+  if ($desc -isnot [System.Collections.IDictionary]) { throw "ingest.ps1: desc file top level must be an object: $DescFile" }
+  $descCount = $desc.Count
+  # before the stop below: nothing to write must not take the server down
+  if ($descCount -eq 0) { Write-Host "ingest.ps1: nothing to apply (0 entries in $DescFile)"; exit 0 }
+} else {
+  if (-not (Test-Path -LiteralPath $ListFile)) { throw "ingest.ps1: list file not found: $ListFile" }
+  $pdfs = @(Get-Content -LiteralPath $ListFile -Encoding UTF8 |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith('#') })
+  if ($pdfs.Count -eq 0) { throw "ingest.ps1: list file is empty: $ListFile" }
+  $missing = @($pdfs | Where-Object { -not (Test-Path -LiteralPath $_) })
+  if ($missing) { throw "ingest.ps1: unresolvable entries in list file: $($missing -join ', ')" }
+  if ($Merged -and $pdfs.Count -gt 1) {
+    throw "ingest.ps1: -Merged takes exactly one source PDF, got $($pdfs.Count). Run it once per source."
+  }
 }
 
 function Get-EnvValue([string]$key) {
@@ -128,7 +150,8 @@ try { docker compose stop lightrag 2>&1 | Out-Null } catch { }
 $stillUp = & { try { docker compose ps --status running -q lightrag 2>$null } catch { $null } }
 if ($stillUp) { throw "ingest.ps1: lightrag still running after 'docker compose stop lightrag' - refusing to write to a live store" }
 
-"=== ragkit ingest $(Get-Date -Format 's') root=$Root merged=$($Merged.IsPresent) files=$($pdfs.Count)" |
+$what = if ($DescFile) { "desc=$DescFile entries=$descCount" } else { "files=$($pdfs.Count)" }
+"=== ragkit ingest $(Get-Date -Format 's') root=$Root merged=$($Merged.IsPresent) $what" |
   Add-Content -LiteralPath $runLog -Encoding UTF8
 "=== lightrag package resolves from: $pkgSource" | Add-Content -LiteralPath $runLog -Encoding UTF8
 
@@ -147,7 +170,9 @@ if ($LASTEXITCODE -ne 0) {
     Add-Content -LiteralPath $runLog -Encoding UTF8
 }
 
-if ($Merged) {
+if ($DescFile) {
+  & $python (Join-Path $PSScriptRoot 'apply_descriptions.py') $DescFile *>> $runLog
+} elseif ($Merged) {
   & $python (Join-Path $PSScriptRoot 'ingest_merged.py') $pdfs[0] --pages $Pages *>> $runLog
 } else {
   & $python (Join-Path $PSScriptRoot 'rag_ingest.py') @pdfs *>> $runLog
@@ -169,7 +194,7 @@ if ($ec -eq 0) {
 # perfectly healthy. The batch-level "Error in multimodal processing" is deliberately NOT counted -
 # it self-heals via "Falling back to individual multimodal processing". Failing the run here is what
 # keeps the log (the error-correction pass needs it) and stops a lossy run reporting success.
-if ($ec -eq 0) {
+if ($ec -eq 0 -and -not $DescFile) {   # description edits run no multimodal LLM calls
   $lost = @(Select-String -LiteralPath $runLog -Pattern 'Error generating .+ description: RetryError' -ErrorAction SilentlyContinue).Count
   if ($lost -gt 0) {
     "PERMANENT_MULTIMODAL_LOSSES=$lost" | Add-Content -LiteralPath $runLog -Encoding UTF8
@@ -195,7 +220,8 @@ if ($ec -eq 0) {
   $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
   $failLog = Join-Path $LOG "ingest_FAILED_$stamp.log"
   Move-Item -LiteralPath $runLog -Destination $failLog -Force
-  $triage = & $python (Join-Path $PSScriptRoot 'ingest_triage.py') --exitcode $ec $failLog @pdfs 2>&1 | Out-String
+  # triage keys off the PDF list; a description batch has none, the run log says enough
+  $triage = if ($DescFile) { '' } else { & $python (Join-Path $PSScriptRoot 'ingest_triage.py') --exitcode $ec $failLog @pdfs 2>&1 | Out-String }
   "EXITCODE=$ec`nWHEN=$stamp`nLOG=$failLog`n$triage" |
     Set-Content -LiteralPath (Join-Path $LOG 'LAST_FAILURE.txt') -Encoding UTF8
   Play-RagSound -Failure
