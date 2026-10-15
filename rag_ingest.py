@@ -8,10 +8,12 @@ then start it again after:  docker compose stop / docker compose start
 import asyncio
 import hashlib
 import os
+import re
 import sys
 import time
 
 from raganything import RAGAnything, RAGAnythingConfig
+from raganything.prompt import PROMPTS as _PROMPTS
 from lightrag.llm.openai import openai_complete_if_cache
 from lightrag.llm.ollama import ollama_embed
 from lightrag.utils import EmbeddingFunc
@@ -282,6 +284,9 @@ async def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwar
 # the caption prompt embeds the path, so the same image re-parses to the same key.
 _CAPTION_CACHE_PATH = os.path.join(WORKING_DIR, "vlm_caption_cache.jsonl")
 _caption_cache = None
+# Per-request cap for the live text-caption call. LLM_TIMEOUT (600s x 3 attempts) is far
+# too long for one caption; 429 backoffs sleep between attempts and are not affected.
+_CAPTION_TIMEOUT = int(os.environ.get("CAPTION_TIMEOUT", "180"))
 
 
 def _caption_key(prompt, system_prompt, image_data, model=VISION_MODEL):
@@ -346,6 +351,33 @@ async def vision_model_func(
     return result
 
 
+# 2026-10-15: one equation caption hung at z.ai (twice, same equation), stalled the run ~30 min,
+# then RAG-Anything indexed the item as a raw dict string. When the caption call fails, hand the
+# processor a LaTeX-only response in its own JSON shape instead. Equations only; never cached.
+# Start is tempered so the LAST "Equation Information" block wins if the context quotes one.
+_EQUATION_BLOCK = re.compile(
+    r"Equation Information:\nEquation: ((?:(?!Equation Information:\nEquation: ).)*?)"
+    r"\nFormat: [^\n]*\n\nFocus on", re.S)
+
+
+def _equation_fallback(prompt, system_prompt):
+    """LaTeX-only equation JSON for a failed caption call, else None."""
+    if system_prompt != _PROMPTS["EQUATION_ANALYSIS_SYSTEM"]:
+        return None
+    blocks = _EQUATION_BLOCK.findall(prompt or "")
+    latex = blocks[-1].strip() if blocks else ""
+    if not latex:
+        return None
+    return _json.dumps({
+        "detailed_description": "Equation in LaTeX (automatic analysis unavailable): " + latex,
+        "entity_info": {
+            "entity_name": "equation_" + hashlib.md5(latex.encode("utf-8")).hexdigest()[:12],
+            "entity_type": "equation",
+            "summary": "Equation in LaTeX: " + latex[:100],
+        },
+    }, ensure_ascii=False)
+
+
 async def caption_llm_func(prompt, system_prompt=None, history_messages=[], **kwargs):
     """Cached text-caption path for the table/equation/generic modal processors."""
     # Anything beyond a bare (prompt, system_prompt) call is not a caption: stay live.
@@ -356,7 +388,14 @@ async def caption_llm_func(prompt, system_prompt=None, history_messages=[], **kw
     hit = cache.get(key)
     if hit is not None:
         return hit
-    result = await llm_model_func(prompt, system_prompt)
+    try:
+        result = await llm_model_func(prompt, system_prompt, timeout=_CAPTION_TIMEOUT)
+    except Exception as exc:
+        fallback = _equation_fallback(prompt, system_prompt)
+        if fallback is None:
+            raise
+        print(f"EQUATION_FALLBACK: caption failed ({type(exc).__name__}), indexing LaTeX only", flush=True)
+        return fallback
     if isinstance(result, str) and result:
         _caption_cache_put(key, result)
     return result

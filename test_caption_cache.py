@@ -140,6 +140,86 @@ def test_processors_get_cached_caption_func():
     assert base._mp.BaseModalProcessor.__init__ is base._bmp_init_cached
 
 
+def _eq_prompt(latex):
+    return base._PROMPTS["equation_prompt"].format(
+        entity_name="equation_x", equation_text=latex, equation_format="latex"
+    )
+
+
+def test_equation_caption_failure_falls_back_to_latex():
+    orig_llm = base.llm_model_func
+    orig_path, orig_cache = base._CAPTION_CACHE_PATH, base._caption_cache
+    tmp = os.path.join(tempfile.mkdtemp(), "vlm_caption_cache.jsonl")
+    try:
+        seen = []
+
+        async def hung_llm(*args, **kwargs):
+            seen.append(kwargs)
+            raise TimeoutError("hung")
+
+        base.llm_model_func = hung_llm
+        base._CAPTION_CACHE_PATH = tmp
+        base._caption_cache = None
+        latex = r"\frac{a}{b} = c"
+        out = asyncio.run(base.caption_llm_func(
+            _eq_prompt(latex), system_prompt=base._PROMPTS["EQUATION_ANALYSIS_SYSTEM"]))
+        assert '"entity_name": "equation_' in out, out
+        assert seen[0].get("timeout") == base._CAPTION_TIMEOUT, seen
+        assert not os.path.exists(tmp), "fallback must not be cached"
+
+        proc = object.__new__(base._mp.EquationModalProcessor)
+        desc, ent = proc._parse_equation_response(out)
+        assert desc.startswith("Equation in LaTeX") and latex in desc, desc
+        assert ent["entity_name"].startswith("equation_") and ent["entity_name"].endswith("(equation)"), ent
+    finally:
+        base.llm_model_func = orig_llm
+        base._CAPTION_CACHE_PATH, base._caption_cache = orig_path, orig_cache
+
+
+def test_non_equation_caption_failure_reraises():
+    orig_llm = base.llm_model_func
+    orig_path, orig_cache = base._CAPTION_CACHE_PATH, base._caption_cache
+    tmp = os.path.join(tempfile.mkdtemp(), "vlm_caption_cache.jsonl")
+    try:
+        async def hung_llm(*args, **kwargs):
+            raise TimeoutError("hung")
+
+        base.llm_model_func = hung_llm
+        base._CAPTION_CACHE_PATH = tmp
+        base._caption_cache = None
+        try:
+            asyncio.run(base.caption_llm_func("table prompt", system_prompt="S"))
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("non-equation failure must re-raise")
+    finally:
+        base.llm_model_func = orig_llm
+        base._CAPTION_CACHE_PATH, base._caption_cache = orig_path, orig_cache
+
+
+def test_live_caption_call_gets_timeout_and_is_cached():
+    orig_llm = base.llm_model_func
+    orig_path, orig_cache = base._CAPTION_CACHE_PATH, base._caption_cache
+    tmp = os.path.join(tempfile.mkdtemp(), "vlm_caption_cache.jsonl")
+    try:
+        seen = []
+
+        async def fake_llm(*args, **kwargs):
+            seen.append(kwargs)
+            return "ok"
+
+        base.llm_model_func = fake_llm
+        base._CAPTION_CACHE_PATH = tmp
+        base._caption_cache = None
+        assert asyncio.run(base.caption_llm_func("table prompt", system_prompt="S")) == "ok"
+        assert seen == [{"timeout": base._CAPTION_TIMEOUT}], seen
+        assert os.path.exists(tmp), "success must still be cached"
+    finally:
+        base.llm_model_func = orig_llm
+        base._CAPTION_CACHE_PATH, base._caption_cache = orig_path, orig_cache
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

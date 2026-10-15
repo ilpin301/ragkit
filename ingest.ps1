@@ -203,6 +203,11 @@ if ($ec -eq 0 -and -not $DescFile) {   # description edits run no multimodal LLM
   }
 }
 
+# Equations whose caption call failed are indexed LaTeX-only (see caption_llm_func), not lost,
+# so this is a note for the log and deliberately leaves $ec alone.
+$eqFallbacks = @(Select-String -LiteralPath $runLog -Pattern '^EQUATION_FALLBACK' -ErrorAction SilentlyContinue).Count
+if ($eqFallbacks -gt 0) { "EQUATION_FALLBACKS=$eqFallbacks" | Add-Content -LiteralPath $runLog -Encoding UTF8 }
+
 "EXITCODE=$ec" | Add-Content -LiteralPath $runLog -Encoding UTF8
 
 . (Join-Path $PSScriptRoot 'notify.ps1')
