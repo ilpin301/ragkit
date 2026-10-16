@@ -15,6 +15,7 @@ from tenacity import RetryError
 slept = []
 async def _fake_sleep(d): slept.append(d)
 R.asyncio.sleep = _fake_sleep
+R._quota_pct = lambda *a: None      # never poll the real monitor from this test
 
 def _rl():
     return RateLimitError("429 code 1302",

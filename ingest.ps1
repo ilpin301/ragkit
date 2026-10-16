@@ -208,6 +208,10 @@ if ($ec -eq 0 -and -not $DescFile) {   # description edits run no multimodal LLM
 $eqFallbacks = @(Select-String -LiteralPath $runLog -Pattern '^EQUATION_FALLBACK' -ErrorAction SilentlyContinue).Count
 if ($eqFallbacks -gt 0) { "EQUATION_FALLBACKS=$eqFallbacks" | Add-Content -LiteralPath $runLog -Encoding UTF8 }
 
+# Quota monitor reads that failed (QUOTA_CHECK_FAILED in rag_ingest.py): a note only, $ec untouched.
+$quotaFails = @(Select-String -LiteralPath $runLog -Pattern '^QUOTA_CHECK_FAILED' -ErrorAction SilentlyContinue).Count
+if ($quotaFails -gt 0) { "QUOTA_CHECK_FAILURES=$quotaFails" | Add-Content -LiteralPath $runLog -Encoding UTF8 }
+
 "EXITCODE=$ec" | Add-Content -LiteralPath $runLog -Encoding UTF8
 
 . (Join-Path $PSScriptRoot 'notify.ps1')

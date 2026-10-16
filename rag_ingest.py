@@ -142,7 +142,13 @@ _ZAI_BACKOFF = (20, 45, 90, 150)
 # Read BOTH TOKENS_LIMIT rows: `number:5` is the 5-hour window, `number:1` is weekly.
 # Watching only the one z.ai names in its 1308 message is how the wrong counter gets
 # blamed.
-_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+_QUOTA_PATH = "/api/monitor/usage/quota/limit"
+# open.bigmodel.cn serves byte-identical data for the same key; api.z.ai alone
+# produced empty bodies and read timeouts mid-ingest (2026-10-16), so it is the
+# fallback, and the second api.z.ai try covers a one-off blip.
+_QUOTA_HOSTS = ("api.z.ai", "api.z.ai", "open.bigmodel.cn")
+_QUOTA_CONFIRM_HOSTS = ("open.bigmodel.cn", "api.z.ai")
+_QUOTA_TIMEOUT = float(os.environ.get("ZAI_QUOTA_TIMEOUT", "5"))
 _QUOTA_STOP_PCT = float(os.environ.get("ZAI_QUOTA_STOP_PCT", "98"))
 _QUOTA_POLL_SEC = float(os.environ.get("ZAI_QUOTA_POLL_SEC", "60"))
 _QUOTA_EXIT_CODE = 17
@@ -150,24 +156,73 @@ _quota_checked_at = 0.0
 _ACTIVE_RAG = None
 
 
-def _quota_pct():
+def _quota_http_get(url):
+    """(status, body text). Module-level so tests can replace it."""
+    import httpx
+    # trust_env=False: this box's system proxy is SOCKS, and picking it up
+    # raises "Missing dependencies for SOCKS support" inside the run.
+    with httpx.Client(trust_env=False, timeout=_QUOTA_TIMEOUT) as client:
+        r = client.get(url, headers={"Authorization": ZAI_KEY})
+    return r.status_code, r.text
+
+
+def _quota_parse(status, text):
+    """Max TOKENS_LIMIT percentage; raises ValueError unless the reading is trustworthy."""
+    if status != 200:
+        raise ValueError("HTTP status is not 200")
+    rows = [r for r in _json.loads(text)["data"]["limits"] if r.get("type") == "TOKENS_LIMIT"]
+    if not rows:
+        raise ValueError("no TOKENS_LIMIT rows")
+    for r in rows:
+        p = r["percentage"]
+        if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 100:
+            raise ValueError(f"percentage out of range: {p!r}")
+        if not r["nextResetTime"] > time.time() * 1000:
+            raise ValueError("nextResetTime is not in the future")
+    return max(r["percentage"] for r in rows)
+
+
+def _quota_pct(hosts=_QUOTA_HOSTS):
     """Highest TOKENS_LIMIT percentage in use, or None if it cannot be read.
 
     Fails OPEN on purpose: a flaky monitor endpoint must never kill a healthy
     ingest. The guard only stops on a number it actually read.
     """
-    try:
-        import httpx
-        # trust_env=False: this box's system proxy is SOCKS, and picking it up
-        # raises "Missing dependencies for SOCKS support" inside the run.
-        with httpx.Client(trust_env=False, timeout=10) as client:
-            r = client.get(_QUOTA_URL, headers={"Authorization": ZAI_KEY})
-            rows = r.json()["data"]["limits"]
-        pcts = [row["percentage"] for row in rows if row.get("type") == "TOKENS_LIMIT"]
-        return max(pcts) if pcts else None
-    except Exception as exc:
-        print(f"WARNING: quota check failed ({exc}); continuing", flush=True)
+    for host in hosts:
+        t0 = time.monotonic()
+        status = body = None
+        try:
+            status, body = _quota_http_get(f"https://{host}{_QUOTA_PATH}")
+            return _quota_parse(status, body)
+        except Exception as exc:
+            what = f"{type(exc).__name__}: {exc}"
+            if status is not None:
+                what = f"HTTP {status} ({what})"
+            # ascii(): the body (msg is Chinese) would crash a cp1251 console.
+            print(f"QUOTA_CHECK_FAILED: host={host} {ascii(what)} "
+                  f"elapsed={time.monotonic() - t0:.1f}s body={ascii((body or '')[:200])}",
+                  flush=True)
+    print("WARNING: quota check failed on all hosts; continuing", flush=True)
+    return None
+
+
+def _quota_confirmed_pct():
+    """Percentage to stop on, or None. A reading >= threshold must be confirmed.
+
+    The confirming read goes to the OTHER host first, so one bad endpoint cannot
+    kill a healthy ingest. Unconfirmed -> do not stop, and re-check on the next call.
+    """
+    global _quota_checked_at
+    pct = _quota_pct()
+    if pct is None or pct < _QUOTA_STOP_PCT:
         return None
+    again = _quota_pct(_QUOTA_CONFIRM_HOSTS)
+    if again is not None and again >= _QUOTA_STOP_PCT:
+        return again
+    print(f"WARNING: quota read {pct}% but confirming read is {again}; "
+          f"not stopping, re-checking on the next call", flush=True)
+    _quota_checked_at = 0.0
+    return None
 
 
 async def _flush_everything():
@@ -211,14 +266,34 @@ async def _quota_guard():
     if now - _quota_checked_at < _QUOTA_POLL_SEC:
         return
     _quota_checked_at = now
-    pct = _quota_pct()
-    if pct is not None and pct >= _QUOTA_STOP_PCT:
+    # to_thread: the sync reads block up to 5 s per host and must not stall the loop.
+    pct = await asyncio.to_thread(_quota_confirmed_pct)
+    if pct is not None:
         await _quota_stop(pct)
+
+
+def _zai_error_code(exc):
+    """z.ai error code as a string, or None. Reads the openai body, then str(exc)."""
+    inner = getattr(getattr(exc, "last_attempt", None), "exception", None)
+    if callable(inner):
+        try:
+            exc = inner() or exc
+        except Exception:
+            pass
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        code = err.get("code") if isinstance(err, dict) else body.get("code")
+        if code is not None:
+            return str(code)
+    # Anchored on the `code` key: a request id like 202610161308026e... must not match.
+    m = re.search(r"""['"]code['"]\s*:\s*['"]?(\d+)""", str(exc))
+    return m.group(1) if m else None
 
 
 def _is_usage_limit(exc):
     """True for z.ai code 1308 - the window is spent, backing off will not help."""
-    return "1308" in str(exc)
+    return _zai_error_code(exc) == "1308"
 # --- end quota stop guard --------------------------------------------------
 
 
@@ -238,14 +313,23 @@ def _is_rate_limit(exc):
 
 async def _complete_with_backoff(*args, **kwargs):
     await _quota_guard()
+    seen_1308 = False
     for delay in _ZAI_BACKOFF:
         try:
             return await _zai_raw_complete(*args, **kwargs)
         except Exception as exc:
             if _is_usage_limit(exc):
                 # Window is spent. Sleeping the full backoff just delays the same
-                # failure and leaves less time to flush.
-                await _quota_stop(100)
+                # failure and leaves less time to flush. But a 1308 the monitor
+                # contradicts gets ONE retry; a second 1308 stops unconditionally.
+                pct = None if seen_1308 else await asyncio.to_thread(_quota_pct)
+                if pct is None or pct >= _QUOTA_STOP_PCT:
+                    await _quota_stop(100)
+                seen_1308 = True
+                print(f"WARNING: z.ai 1308 but monitor reads {pct}%, "
+                      f"sleeping {delay}s before one retry", flush=True)
+                await asyncio.sleep(delay)
+                continue
             if not _is_rate_limit(exc):
                 raise
             print(f"WARNING: z.ai 429, sleeping {delay}s before retry", flush=True)
@@ -538,8 +622,8 @@ async def main(paths):
         enable_equation_processing=True,
     )
     rag = _register_rag(build_rag(config))
-    pct = _quota_pct()
-    if pct is not None and pct >= _QUOTA_STOP_PCT:
+    pct = _quota_confirmed_pct()
+    if pct is not None:
         print(f"ABORT: z.ai quota already at {pct}% before start "
               f"(threshold {_QUOTA_STOP_PCT}%); not registering any document.",
               flush=True)
