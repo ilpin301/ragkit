@@ -246,6 +246,23 @@ def test_1308_code_parsing_is_precise():
     assert not base._is_usage_limit(RetryError(Attempt(_api_error("1302"))))
 
 
+def test_every_zai_stop_code_is_detected():
+    for code in sorted(base._ZAI_STOP_CODES):
+        assert base._is_usage_limit(_api_error(code)), code
+        assert base._is_usage_limit(_api_error(int(code), nested=False)), code
+        assert base._is_usage_limit(Exception(f"Error code: 429 - {{'error': {{'code': '{code}', "
+                                              "'message': 'limit'}}}}")), code
+    assert base._ZAI_STOP_CODES == {"1113", "1308", "1309", "1310", "1314", "1316", "1317",
+                                    "1318", "1319", "1320", "1321"}
+    for code in ("1302", "1305", "1311", "1313"):
+        assert not base._is_usage_limit(_api_error(code)), code
+        assert not base._is_usage_limit(Exception(f"Error code: 429 - {{'error': {{'code': "
+                                                  f"'{code}', 'message': 'x'}}}}")), code
+    # request id containing 1309, real code 1305: no match
+    msg = "Overloaded, request id 202610161309026eb3fa55740a4634"
+    assert not base._is_usage_limit(_api_error("1305", msg))
+
+
 def _backoff_run(errors, monitor):
     """Run _complete_with_backoff against `errors`; returns (result, slept, stopped, pct reads)."""
     slept, stopped, queue = [], [], list(errors)

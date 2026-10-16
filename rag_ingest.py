@@ -291,9 +291,14 @@ def _zai_error_code(exc):
     return m.group(1) if m else None
 
 
+# https://docs.z.ai/api-reference/api-code - quota/balance/plan codes; 1302/1305 are plain backoff.
+_ZAI_STOP_CODES = {"1113", "1308", "1309", "1310", "1314",
+                   "1316", "1317", "1318", "1319", "1320", "1321"}
+
+
 def _is_usage_limit(exc):
-    """True for z.ai code 1308 - the window is spent, backing off will not help."""
-    return _zai_error_code(exc) == "1308"
+    """True for a z.ai quota/balance/plan code (_ZAI_STOP_CODES) - backing off will not help."""
+    return _zai_error_code(exc) in _ZAI_STOP_CODES
 # --- end quota stop guard --------------------------------------------------
 
 
@@ -313,20 +318,20 @@ def _is_rate_limit(exc):
 
 async def _complete_with_backoff(*args, **kwargs):
     await _quota_guard()
-    seen_1308 = False
+    seen_limit = False
     for delay in _ZAI_BACKOFF:
         try:
             return await _zai_raw_complete(*args, **kwargs)
         except Exception as exc:
             if _is_usage_limit(exc):
                 # Window is spent. Sleeping the full backoff just delays the same
-                # failure and leaves less time to flush. But a 1308 the monitor
-                # contradicts gets ONE retry; a second 1308 stops unconditionally.
-                pct = None if seen_1308 else await asyncio.to_thread(_quota_pct)
+                # failure and leaves less time to flush. But a usage-limit code the
+                # monitor contradicts gets ONE retry; a second one stops unconditionally.
+                pct = None if seen_limit else await asyncio.to_thread(_quota_pct)
                 if pct is None or pct >= _QUOTA_STOP_PCT:
                     await _quota_stop(100)
-                seen_1308 = True
-                print(f"WARNING: z.ai 1308 but monitor reads {pct}%, "
+                seen_limit = True
+                print(f"WARNING: z.ai {_zai_error_code(exc)} but monitor reads {pct}%, "
                       f"sleeping {delay}s before one retry", flush=True)
                 await asyncio.sleep(delay)
                 continue

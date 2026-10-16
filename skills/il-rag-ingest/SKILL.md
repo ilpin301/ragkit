@@ -341,15 +341,23 @@ advances.
 worst `TOKENS_LIMIT` row reaches **98%** (`ZAI_QUOTA_STOP_PCT` to override, `ZAI_QUOTA_POLL_SEC`
 for the poll interval). It reads BOTH rows - `number:5` is the 5-hour window, `number:1` is
 weekly - because z.ai's `1308` message always names the 5-hour one even when weekly is the
-binding cap. It also trips immediately on a `1308` error instead of burning the 305 s backoff.
+binding cap. It also trips immediately on any z.ai usage-limit code (see below) instead of burning the 305 s backoff.
 
 On trip it flushes every storage that can persist itself, prints `ABORT: z.ai quota ...` and
 exits **17**, which `ingest_triage.py` reports as `LLM_QUOTA_STOP`. There is also a pre-flight
 check before the first document, so a doomed run exits without registering anything as
 `handling` - no delete/repair cycle needed.
 
-The guard **fails open**: if the quota endpoint is unreachable or returns junk, it logs a warning
-and the ingest continues. A flaky monitor must never kill a healthy run. Because both entry
+The guard **fails open**: if no host gives a valid reading it logs `WARNING: quota check failed on
+all hosts; continuing` and the ingest continues. A flaky monitor must never kill a healthy run.
+Since ragkit db055d4 (2026-10-16) each read tries api.z.ai, api.z.ai again, then open.bigmodel.cn
+(same key, identical data), 5 s each (`ZAI_QUOTA_TIMEOUT`), off the event loop. Every failed
+attempt prints one `QUOTA_CHECK_FAILED: host=... HTTP <status> ... body=...` line, and
+`ingest.ps1` appends `QUOTA_CHECK_FAILURES=<n>` to the run log. A reading at or above the
+threshold is only acted on after a second reading (bigmodel.cn first) confirms it. A z.ai
+usage-limit code (1113, 1308, 1309, 1310, 1314, 1316-1321) is detected from the parsed error
+`code`, not a substring, and gets one retry if the monitor reads below the threshold; a second
+hit stops. Because both entry
 points route through `llm_model_func`/`vision_model_func`, this covers `rag_ingest.py` and
 `ingest_merged.py` on every base.
 
@@ -499,6 +507,10 @@ them.
 
 Also grep the archived log for `Worker timeout` — must be 0. Nonzero means the embedding flush
 timed out mid-run; see the serial-fallback section in `raganything-ingest`.
+
+Also grep it for `QUOTA_CHECK_FAILURES=`. Any value means the quota guard was partly or fully
+blind during the run; report the count and read the `QUOTA_CHECK_FAILED:` lines (status + body)
+before deleting the log - they are the only evidence of why the monitor failed.
 
 **Never verify a deletion from `docker logs`** — the line scrolls out of the tail window and the
 waiter hangs forever. Verify from the store files:
