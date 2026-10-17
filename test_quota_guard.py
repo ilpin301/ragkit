@@ -156,6 +156,11 @@ def test_invalid_readings_are_rejected():
     assert base._quota_parse(200, payload(0, 100)) == 100
 
 
+def test_missing_reset_time_is_accepted():
+    body = json.dumps({"data": {"limits": [{"type": "TOKENS_LIMIT", "percentage": 40}]}})
+    assert base._quota_parse(200, body) == 40
+
+
 def test_guard_stops_only_when_confirmed():
     cases = [                       # (first, confirm, stops)
         (99, 50, False),

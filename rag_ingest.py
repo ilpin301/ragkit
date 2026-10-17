@@ -177,7 +177,8 @@ def _quota_parse(status, text):
         p = r["percentage"]
         if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 100:
             raise ValueError(f"percentage out of range: {p!r}")
-        if not r["nextResetTime"] > time.time() * 1000:
+        # z.ai omits nextResetTime on some rows; the percentage above is still valid.
+        if r.get("nextResetTime") is not None and not r["nextResetTime"] > time.time() * 1000:
             raise ValueError("nextResetTime is not in the future")
     return max(r["percentage"] for r in rows)
 
