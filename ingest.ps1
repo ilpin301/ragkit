@@ -221,7 +221,8 @@ if ($ec -eq 0) {
   # losses (see OPERATING.md). It must survive until that pass reports zero.
   if (Test-Path -LiteralPath $runLog) {
     $okStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    Move-Item -LiteralPath $runLog -Destination (Join-Path $LOG "ingest_run.$okStamp.ok.log") -Force
+    $okLog = Join-Path $LOG "ingest_run.$okStamp.ok.log"
+    Move-Item -LiteralPath $runLog -Destination $okLog -Force
   }
   Remove-Item -LiteralPath (Join-Path $LOG 'LAST_FAILURE.txt') -Force -ErrorAction SilentlyContinue
   Play-RagSound -Success
@@ -234,6 +235,35 @@ if ($ec -eq 0) {
   "EXITCODE=$ec`nWHEN=$stamp`nLOG=$failLog`n$triage" |
     Set-Content -LiteralPath (Join-Path $LOG 'LAST_FAILURE.txt') -Encoding UTF8
   Play-RagSound -Failure
+}
+
+# AUTO-CLEAN: a clean success leaves nothing to replay, so drop the LLM/VLM caches and
+# the source's parse artifacts. Runs on the archived log (left untouched: the
+# error-correction pass reads it) and while lightrag is still stopped (stopped at the
+# top, started below), so the server never holds the cache file in memory. Any
+# permanent-loss signal keeps the caches for the repair pass. Never changes $ec.
+if ($ec -eq 0 -and -not $DescFile -and $okLog) {
+  try {
+    $sig = Select-String -LiteralPath $okLog -Pattern 'Traceback|ABORT|Error generating|RetryError|STALE parse cache' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($sig) {
+      Write-Host "AUTO-CLEAN SKIPPED: log carries '$($sig.Matches[0].Value)' (line $($sig.LineNumber)), caches kept for the repair pass"
+    } else {
+      $store = Join-Path $baseLr 'data\rag_storage'
+      foreach ($f in 'kv_store_llm_response_cache.json', 'vlm_caption_cache.jsonl') {
+        $p = Join-Path $store $f
+        if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
+      }
+      $nSrc = 0
+      if ($Merged) {   # slice route names its artifacts differently, only -Merged has a work_key
+        foreach ($pdf in $pdfs) {
+          & $python (Join-Path $PSScriptRoot 'ingest_merged.py') --cleanup $pdf --apply 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "ingest_merged.py --cleanup exited $LASTEXITCODE for $pdf" }
+          $nSrc++
+        }
+      }
+      Write-Host "AUTO-CLEAN done: llm_cache, vlm_cache, parse artifacts ($nSrc sources)"
+    }
+  } catch { Write-Host "AUTO-CLEAN FAILED: $($_.Exception.Message)" }
 }
 
 docker compose start lightrag

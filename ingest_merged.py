@@ -28,9 +28,11 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -124,13 +126,47 @@ def find_running_lines(pages_text, min_ratio=0.6):
 JUNK_TYPES = {"page_number", "header", "footer"}
 
 
+def work_key(path):
+    """Cache/slice name: 30-char readable prefix + hash of the FULL stem.
+    A bare stem[:40] collided for same-prefix sources (Mortimer textbook slices)."""
+    stem = Path(path).stem
+    return f"{stem[:30]}_{hashlib.sha1(stem.encode('utf-8')).hexdigest()[:8]}"
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def cleanup_source(src, apply=False):
+    """List (or with apply, delete) a source's parse artifacts: the merged_ingest
+    work dir AND its mineru_output entries together (the cache points into mineru_output)."""
+    key = work_key(src)
+    mineru = BASE_DATA / "mineru_output"
+    found = [p for p in [CACHE / key] if p.exists()]
+    if mineru.is_dir():
+        found += sorted(p for p in mineru.iterdir() if p.name.startswith(key + "__p"))
+    if not found:
+        print(f"nothing to delete for key {key}")
+    for p in found:
+        print(f"{'removing' if apply else 'would remove'}: {p}")
+        if apply:
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+    if found and not apply:
+        print("dry run; pass --apply to delete")
+    return 0
+
+
 def slice_pdf(src, out_dir, pages_per_slice):
     """Cut src into non-overlapping slices. Returns [(path, first_page_idx0)]."""
     import pymupdf
 
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open(src)
-    stem = Path(src).stem[:40]
+    stem = work_key(src)
     made = []
     for start in range(0, doc.page_count, pages_per_slice):
         end = min(start + pages_per_slice, doc.page_count) - 1
@@ -369,10 +405,15 @@ def main(argv=None):
     ap.add_argument("--parse-only", action="store_true", help="stop before insert")
     ap.add_argument("--parse-one", nargs=2, metavar=("SLICE", "OUT"))
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--cleanup", metavar="SOURCE_PDF",
+                    help="list the source's parse artifacts (delete with --apply)")
+    ap.add_argument("--apply", action="store_true", help="with --cleanup: really delete")
     args = ap.parse_args(argv)
 
     if args.self_test:
         return self_test()
+    if args.cleanup:
+        return cleanup_source(args.cleanup, args.apply)
     if args.parse_one:
         parse_one(*args.parse_one)
         return 0
@@ -380,9 +421,16 @@ def main(argv=None):
         ap.error("source PDF required")
 
     src = Path(args.source).resolve()
-    work = CACHE / src.stem[:40]
+    work = CACHE / work_key(src)
     slices_dir, parsed_dir = work / "slices", work / "parsed"
+    # never reuse a parse cache unless it is proven to belong to these exact bytes
+    sha, sha_file = file_sha256(src), work / "source.sha256"
+    if any(parsed_dir.glob("*")) and (not sha_file.exists()
+                                      or sha_file.read_text().strip() != sha):
+        print(f"STALE parse cache for {src.name} (source changed or unverified) - clearing parsed/")
+        shutil.rmtree(parsed_dir)
     parsed_dir.mkdir(parents=True, exist_ok=True)
+    sha_file.write_text(sha)
 
     print(f"[1/5] slicing {src.name} at {args.pages} pages/slice")
     made = slice_pdf(src, slices_dir, args.pages)
@@ -520,6 +568,13 @@ def self_test():
     out, st = clean_items(items, min_ratio=0.99)
     assert len(items) - len(out) == st["junk_items"] + st["empty_items"] + st["rejoined"]
     assert st["unaccounted"] == 0
+
+    # work_key: same 40-char prefix must not collide (Mortimer slices), same stem is stable
+    a = work_key("X:/IN/Chemie, 10. Auflage (Charles E. Mortimer, Ulrich Müller)-022-803-183-200.pdf")
+    b = work_key("X:/IN/Chemie, 10. Auflage (Charles E. Mortimer, Ulrich Müller)-022-803-201-210.pdf")
+    assert a != b, (a, b)
+    assert a == work_key("other/dir/Chemie, 10. Auflage (Charles E. Mortimer, Ulrich Müller)-022-803-183-200.pdf")
+    assert not set(a) & set("/\\"), a
 
     print("self-test OK")
     return 0

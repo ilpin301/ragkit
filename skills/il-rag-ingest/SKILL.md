@@ -494,6 +494,12 @@ is the cheapest way to record those).
      description, so it contributed no entities/relations. This is the only count that matters for
      the gate below.
 
+   Also `grep -n 'cached:\|STALE parse cache'` the archived log. On a fresh (non-resumed) source any
+   `cached:` line is a FAIL - wrong pages may have been ingested (2026-10-20: 201-210 replayed the
+   183-200 parse). Then compare the source PDF's first-page text with the new doc's first chunk
+   `content`; they must match. The Step 6.4 targeted query must be about the LAST pages' topic of the
+   source, not just the first.
+
    Only a `Traceback` or an `ABORT` line, or a nonzero permanent-loss count, fails this check — a
    run can log several ERROR/RetryError lines and still be clean if every one of them resolved via
    the self-heal path. If the permanent-loss count is nonzero: lower `MAX_ASYNC` and the per-role
@@ -537,8 +543,10 @@ the input the correction pass re-checks after every corrective re-ingest.
 - delete the slice PDFs (`stem-NN-MM.pdf`); keep the source PDF. The kit has an idempotent,
   dry-run-by-default helper:
   `pwsh -File (Join-Path $Kit 'repairs\cleanup_processed_slices.ps1') -Root $Root` (add `-Apply`).
-- delete the source's parse artifacts: `lightrag\data\mineru_output\<source-stem>*` and
-  `lightrag\data\merged_ingest\<source-stem>\`, always **together**. `merged_ingest\<src>\parsed\*.json`
+- delete the source's parse artifacts with
+  `$env:RAGBASE_ROOT=$Root; & $Py (Join-Path $Kit 'ingest_merged.py') --cleanup "<source.pdf>" --apply`
+  (dry run without `--apply`). It removes `merged_ingest\<work_key>` and `mineru_output\<work_key>__p*`,
+  always **together**. `merged_ingest\<src>\parsed\*.json`
   is the resume cache and its `img_path` entries point into `mineru_output`; deleting one without the
   other leaves a parse cache pointing at missing images, and the resumed run then fails every image
   caption while still exiting 0. Never delete either pair for a source still in flight or stuck
@@ -626,6 +634,8 @@ docker stop $Container     # never delete while the server holds its own in-memo
 Remove-Item (Join-Path $Store 'kv_store_llm_response_cache.json')
 Remove-Item (Join-Path $Store 'vlm_caption_cache.jsonl') -ErrorAction SilentlyContinue
 ```
+
+The launcher now does this automatically on a clean success (ragkit `ingest.ps1` AUTO-CLEAN prints `AUTO-CLEAN done` / `SKIPPED` / `FAILED`); run the manual commands only for a skipped/failed case.
 
 LightRAG recreates the file empty on the next run. This is deliberate, not housekeeping: the cache
 exists so a crashed or interrupted run can be replayed without paying for extraction twice, and once
