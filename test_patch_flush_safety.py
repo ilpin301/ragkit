@@ -12,7 +12,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "repairs"))
-from patch_flush_safety import patch_file_atomic, patch_lightrag  # noqa: E402
+from patch_flush_safety import patch_file_atomic, patch_lightrag, patch_utils  # noqa: E402
 
 FILE_ATOMIC = '''import os
 logger = None
@@ -54,9 +54,24 @@ LIGHTRAG = '''class LightRAG:
         return results
 '''
 
+UTILS = '''import re
+
+
+def fix_tuple_delimiter_corruption(record, delimiter_core, tuple_delimiter):
+    if not record or not delimiter_core or not tuple_delimiter:
+        return record
+
+    # Escape the delimiter core for regex use
+    escaped_delimiter_core = re.escape(delimiter_core)
+
+    record = re.sub(rf"<\\|?{escaped_delimiter_core}\\|?>", tuple_delimiter, record)
+    return record
+'''
+
 for name, fn, src, marker in (
     ("file_atomic", patch_file_atomic, FILE_ATOMIC, "_fsync_file(tmp, workspace)"),
     ("lightrag", patch_lightrag, LIGHTRAG, "Flush start:"),
+    ("utils", patch_utils, UTILS, "ragkit: whitespace inside the delimiter"),
 ):
     once, status = fn(src)
     assert status == "patched", f"{name}: first pass returned {status}"
@@ -70,7 +85,7 @@ for name, fn, src, marker in (
 
     drifted = src.replace("write_fn(tmp)", "write_fn(TMP)").replace(
         "async def _flush_one(storage_inst) -> None:", "async def _flush_one(inst):"
-    )
+    ).replace("re.escape(delimiter_core)", "re.escape(core)")
     moved, status = fn(drifted)
     assert status == "anchor-missing", f"{name}: drifted source returned {status}"
     assert moved == drifted, f"{name}: drifted source was modified anyway"
@@ -79,4 +94,16 @@ for name, fn, src, marker in (
 patched, _ = patch_lightrag(LIGHTRAG)
 assert "asyncio.gather" in patched and "return results" in patched, "tail lost"
 
-print("OK: patcher is idempotent, syntax-clean, and refuses drifted sources")
+# the patched fixer repairs whitespace variants and leaves good records alone
+ns = {}
+exec(patch_utils(UTILS)[0], ns)
+fix = ns["fix_tuple_delimiter_corruption"]
+D = "<|#|>"
+for bad in ("<|# |>", "<| #|>", "<| # |>", "< |#| >"):
+    rec = f"entity{D}BaSO4{D}NaturalObject{bad}Sparingly soluble salt"
+    assert fix(rec, "#", D).split(D) == ["entity", "BaSO4", "NaturalObject", "Sparingly soluble salt"], bad
+good = f"entity{D}a{D}b{D}c"
+assert fix(good, "#", D) == good, "good record changed"
+assert fix("pH < 7 | # 3 |", "#", D) == "pH < 7 | # 3 |", "plain text changed"
+
+print("OK: patcher is idempotent, syntax-clean, refuses drifted sources, and fixes spaced delimiters")

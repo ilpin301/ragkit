@@ -1,4 +1,4 @@
-"""Apply the two flush-phase safety patches to a lightrag package, idempotently.
+"""Apply ragkit's three patches to a lightrag package, idempotently.
 
     python repairs/patch_flush_safety.py [<lightrag package dir> ...]
 
@@ -16,6 +16,12 @@ Patch 2 - lightrag.py: log start/done + seconds + megabytes for every storage
 flush. The heavy saves log nothing of their own, so a process killed inside the
 flush left a log whose last line named a storage that had already finished -
 the 2026-09-08 crash looked like a graphml failure and was not one.
+
+Patch 3 - utils.py: ``fix_tuple_delimiter_corruption`` also repairs whitespace
+inside the tuple delimiter (``<|# |>``, ``<| #|>``). Upstream has no rule for it,
+so the record splits short and the whole entity/relation is dropped with "LLM
+output format error; found 3/4 fields" - 61 drops (3.3%) on CHEM_RAG 329-340,
+2026-10-23.
 
 Exit 0 if every target ends up patched (or already was), 1 if an anchor was not
 found - upstream moved and the patch needs re-fitting. Never partially writes:
@@ -93,6 +99,18 @@ _REAP = "def reap_orphan_tmp_files("
 _WRITE_FN = "        write_fn(tmp)\n        _preserve_mode("
 _FLUSH_START = "        async def _flush_one(storage_inst) -> None:"
 _FLUSH_END = ") from e\n"
+_DELIM_ANCHOR = (
+    "    # Escape the delimiter core for regex use\n"
+    "    escaped_delimiter_core = re.escape(delimiter_core)\n"
+)
+DELIM_WS_FIX = r'''
+    # ragkit: whitespace inside the delimiter (<|# |>, <| #|>) -> <|#|>
+    record = re.sub(
+        rf"<\s*\|\s*{escaped_delimiter_core}\s*\|\s*>",
+        tuple_delimiter,
+        record,
+    )
+'''
 
 
 def patch_file_atomic(src: str) -> tuple[str, str]:
@@ -124,11 +142,24 @@ def patch_lightrag(src: str) -> tuple[str, str]:
     return src[:start] + FLUSH_ONE + src[end:], "patched"
 
 
-TARGETS = (("file_atomic.py", patch_file_atomic), ("lightrag.py", patch_lightrag))
+def patch_utils(src: str) -> tuple[str, str]:
+    """Return (new_source, status) for utils.py."""
+    if "ragkit: whitespace inside the delimiter" in src:
+        return src, "already"
+    if src.count(_DELIM_ANCHOR) != 1:
+        return src, "anchor-missing"
+    return src.replace(_DELIM_ANCHOR, _DELIM_ANCHOR + DELIM_WS_FIX, 1), "patched"
+
+
+TARGETS = (
+    ("file_atomic.py", patch_file_atomic),
+    ("lightrag.py", patch_lightrag),
+    ("utils.py", patch_utils),
+)
 
 
 def apply_to_package(pkg_dir: str) -> bool:
-    """Patch both files in ``pkg_dir``. True if the package is fully patched."""
+    """Patch every TARGETS file in ``pkg_dir``. True if the package is fully patched."""
     ok = True
     for name, fn in TARGETS:
         path = os.path.join(pkg_dir, name)
