@@ -163,6 +163,10 @@ $keepAwake = Join-Path $baseLr 'keepawake.ps1'
 if (-not (Test-Path -LiteralPath $keepAwake)) {
   Copy-Item -LiteralPath (Join-Path $kit 'template\keepawake.ps1') -Destination $keepAwake
 }
+$uploadStatus = Join-Path $root 'drive_upload_status.py'
+if (-not (Test-Path -LiteralPath $uploadStatus)) {
+  Copy-Item -LiteralPath (Join-Path $kit 'template\drive_upload_status.py') -Destination $uploadStatus
+}
 $ragSync = Join-Path $root 'rag_sync.ps1'
 if (-not (Test-Path -LiteralPath $ragSync)) {
   Set-Content -LiteralPath $ragSync -Encoding UTF8 -Value (

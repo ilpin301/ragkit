@@ -55,6 +55,8 @@ Derived layout used below: source folder `$Root\IN\` (**ingest ONLY from here**)
 
 ## Step 0 — preflight
 
+**Start keepawake FIRST**, before Docker/Ollama/Drive startup and before any launch — snippet and release rule in "Keep the machine awake" below. It stays on until Step 8 reports VERIFIED.
+
 **Docker down => start it yourself, do not ask.** `docker` failing with
 `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine` means Docker Desktop
 is not running (typical after a reboot). Start it, wait for the engine, then bring the base's containers
@@ -185,15 +187,18 @@ new ingest — say so and stop for the user's call.
 If the new list holds more than one file, **do NOT put them all in one list file.** Ingest them
 **one at a time**, in a full Step 2 → Step 7 cycle per source: probe, slice if needed, launch,
 wait, verify all five, run the error-correction pass, then do the COMPLETE cleanup and bookkeeping
-(ledger, slice deletion, archived log, LLM cache, keepawake, background shells, project memory).
-Only when that source is finished and verified clean does the next one start.
+(ledger, slice deletion, archived log, LLM cache, background shells, project memory), then the Drive
+backup and its cloud verification (Step 8). keepawake is released last, by Step 8.
+Only when that source is finished, verified clean AND its backup is VERIFIED in the cloud does the next one start.
 
 Report the queue up front (`3 new: A, B, C — ingesting one at a time, A first`), then one summary
 per source as it lands.
 
 **Back up to Drive between sources.** The per-source cleanup is not done until `rag_sync.ps1 push`
-has run and reported success — that push is what makes the just-ingested document survivable, and it
-is far cheaper to redo one source than a whole queue. Only then does the next source launch.
+has run AND Step 8 has verified the archive reached the cloud — that backup is what makes the
+just-ingested document survivable, and it is far cheaper to redo one source than a whole queue. A push
+that exits 0 is "pushed locally", not "backed up". Only a VERIFIED Step 8 lets the next source launch.
+The push runs under keepawake like any other RAG process.
 
 ```powershell
 # Google Drive must be mounted first - J:\ is a virtual drive, it is absent when Drive is not running
@@ -211,6 +216,7 @@ if (-not (Test-Path 'J:\My Drive')) { throw 'Google Drive did not mount - stop t
 $gd = Get-Process GoogleDriveFS -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1
 $wait = 300 - ((Get-Date) - $gd.StartTime).TotalSeconds
 if ($wait -gt 0) { Start-Sleep -Seconds ([int][math]::Ceiling($wait)) }
+$pushStart = (Get-Date).ToUniversalTime()      # Step 8 compares the cloud modifiedTime against this
 & (Join-Path $Root 'rag_sync.ps1') push
 ```
 
@@ -231,9 +237,10 @@ Three traps here:
 - `rag_sync.ps1 push` stops the LightRAG container for the duration and restarts it if it was
   running; on a Qdrant base it also exports a snapshot per collection into
   `lightrag\data\qdrant_snapshots\` and tars it alongside `rag_storage`. A backup taken any other
-  way contains no vectors. Confirm the push printed its archive path before moving on.
+  way contains no vectors. Confirm the push printed its archive path, then go to Step 8.
 
-If the push FAILS, the queue stops — same as a failed ingest. Report and wait for the user's call.
+If the push FAILS, the queue stops — same as a failed ingest. Report and wait for the user's call;
+keepawake stays ON.
 
 A source that FAILS, or finishes with a nonzero permanent-loss count, STOPS the queue. Report it and
 wait for the user's call — do not move on to the next file and do not silently skip the broken one.
@@ -559,15 +566,60 @@ the input the correction pass re-checks after every corrective re-ingest.
   fails silently if Docker Desktop is down) — if so, start it with the Step 0 Docker snippet.
 
 Emit ONE end-of-run summary: files ingested, the five verification numbers (including the
-permanent-loss count), anything skipped and why.
+permanent-loss count), the Step 8 backup numbers (local size, cloud size, cloud modifiedTime),
+anything skipped and why.
 
 Then run `rag_sync.ps1 push` (launching Google Drive first if `J:` is not mounted — see ONE SOURCE
-PER RUN in Step 1) and confirm it succeeded. Only then return to Step 2 for the next queued source.
-Cleanup and Drive sync are not deferrable to the end of the queue — each source is fully closed out
-before the next launch.
+PER RUN in Step 1), still under keepawake, and go to Step 8. A push that exits 0 only means the file
+reached the local `J:` mount. Only a VERIFIED Step 8 lets you return to Step 2 for the next queued
+source. Cleanup and Drive sync are not deferrable to the end of the queue — each source is fully
+closed out before the next launch.
 
 **Always sweep orphaned vectors after a delete.** `DELETE /documents/delete_document` strands entity
 vectors that the graph no longer has, on clean deletes too. The procedure is in `raganything-ingest`.
+
+## Step 8 — verify the Drive backup reached the cloud (mandatory, gates keepawake release)
+
+`rag_sync.ps1` exit 0 only proves the archive reached the local `J:` mount, not Google's servers
+(~900 MB uploads in the background). keepawake and GoogleDriveFS stay up until the cloud copy matches.
+
+a) Before the push (Step 1 block): `$pushStart = (Get-Date).ToUniversalTime()`.
+
+b) After the push, local checks from native PowerShell:
+
+```powershell
+$arc = "J:\My Drive\RAG\$(Split-Path $Root -Leaf)\rag_storage.tgz"   # path rag_sync.ps1 prints as 'pushed ... -> <path>'; use the printed path if it differs
+$loc = Get-Item -LiteralPath $arc
+& "$env:SystemRoot\System32\tar.exe" -tzf $arc | Measure-Object | Select-Object -ExpandProperty Count   # must be > 0 with $LASTEXITCODE 0
+"local size=$($loc.Length) mtime=$($loc.LastWriteTimeUtc.ToString('o'))"
+```
+
+Use the Windows `tar.exe` by full path (msys tar from Git Bash misreads paths). The push output line
+`pushed <N> MB -> <path>` must be present, and `LastWriteTimeUtc` must be >= `$pushStart`.
+
+c) Cloud check via the Google Drive MCP (`mcp__claude_ai_Google_Drive__search_files` /
+`mcp__claude_ai_Google_Drive__get_file_metadata`; deferred — load them with ToolSearch `select:` first).
+Find the base folder: `search_files` query `title = '<base folder name>' and mimeType = 'application/vnd.google-apps.folder'`,
+then `title = 'rag_storage.tgz' and parentId = '<folder id>'` with `excludeContentSnippets: true`. There
+are several `rag_storage.tgz` files (one per base) — always filter by `parentId`, never take the first hit.
+**VERIFIED** = cloud `fileSize` equals local `Length` exactly AND cloud `modifiedTime` >= `$pushStart`.
+
+d) Not verified yet = Drive is still uploading. Keep GoogleDriveFS running, keep keepawake ON, wait with a
+background one-shot waiter (`sleep 300` in a `run_in_background` Bash call — foreground sleep is blocked),
+then re-check. Silent: no progress messages between checks. Give up after 60 min: report
+"backup NOT confirmed in cloud" with last cloud size/modifiedTime vs local, keep keepawake ON, stop the
+queue, wait for the user.
+
+e) Google Drive MCP not available in the session: do not assume success. Report it, keep keepawake ON,
+ask the user to confirm the Drive tray shows the upload finished, and stop the queue until they confirm.
+
+f) Never shut down or kill GoogleDriveFS before VERIFIED.
+
+g) On VERIFIED: print one line `BACKUP VERIFIED cloud size=<n> modifiedTime=<t>`, THEN stop keepawake
+(`Stop-Process -Id $ka.Id -Force`) and confirm with `powercfg /requests` that the SYSTEM block is gone.
+Only now is the source closed out and the next queued source may start at Step 2.
+
+h) The end-of-run summary (Step 7) carries the evidence: local size, cloud size, cloud modifiedTime.
 
 ## Windows gotchas that cost time
 
@@ -587,7 +639,7 @@ vectors that the graph no longer has, on clean deletes too. The procedure is in 
 
 Any long-running RAG shell process — ingest, parse, insert, delete, enrich, audit — must run with sleep blocked, or the box suspends mid-run and the job dies.
 
-Start this BEFORE launching the process (`keepawake.ps1` is a per-base script, in the base's `lightrag\`):
+Start this in Step 0 preflight, BEFORE Docker/Ollama/Drive startup and before launching any process (`keepawake.ps1` is a per-base script, in the base's `lightrag\`):
 
 ```powershell
 $ka = Start-Process pwsh -ArgumentList '-NoProfile','-File',(Join-Path $LrDir 'keepawake.ps1') -PassThru -WindowStyle Hidden
@@ -603,7 +655,11 @@ Expect `SYSTEM: [PROCESS] ...pwsh.exe`. If it says `None.`, the block is NOT act
 
 `keepawake.ps1` holds `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_AWAYMODE_REQUIRED)` for as long as it lives, so killing the process releases the block automatically — there is no persistent power setting to restore. Display sleep is deliberately still allowed; only system sleep is blocked.
 
-Stop it as part of the cleanup below, once no RAG process is still running:
+**keepawake is stopped ONLY after Step 8 (cloud backup verification) reports VERIFIED.** Not after `EXITCODE=0`, not after Step 6, not after Step 7 cleanup, not after `rag_sync.ps1 push` exits 0. The push itself (`rag_sync.ps1`) is a RAG process and must run under keepawake. On any failure or unverified case keepawake stays ON and the user is told.
+
+Why: 2026-10-22 keepawake was stopped right after verification; `rag_sync.ps1 push` then ran unprotected, the PC had been idle 2.5 h and Windows slept within 3 s (`Kernel-Power 42`, Sleep Reason: System Idle) in the middle of the push. The push resumed after wake and exited 0, yet the cloud copy ~5 min later still showed the previous day's archive.
+
+Release (only from Step 8, on VERIFIED):
 
 ```powershell
 Stop-Process -Id $ka.Id -Force
@@ -616,7 +672,7 @@ Gotcha: PowerShell parses `0x80000000` as a signed Int32, so building the flags 
 When the run finishes SUCCESSFULLY — `EXITCODE=0`, Step 6 verification passed, AND the Step 6.5
 error-correction pass reports zero permanent losses — do both of these before reporting done:
 
-1. **Kill every shell process started for this run.** Background waiters, `tail -f` tails, monitors, poll loops, and the `keepawake.ps1` process — the user's and yours. Use `TaskStop` on each background task id. Leave nothing running.
+1. **Kill every shell process started for this run.** Background waiters, `tail -f` tails, monitors and poll loops — the user's and yours. Use `TaskStop` on each background task id. Leave nothing running EXCEPT `keepawake.ps1`: it is released last, by Step 8, after the cloud backup is VERIFIED (and Step 8's own waiter ends with it).
 2. **Delete the archived log** (`ingest_run.<stamp>.ok.log`) and any scratchpad task-output files for this run.
 
 Order matters: kill the tails BEFORE deleting the log, or a live `tail -f` holds the handle.

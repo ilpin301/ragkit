@@ -246,6 +246,9 @@ Check `/openapi.json` before guessing any route shape.
 
 - `rag_sync.ps1 push|pull` moves the whole store to and from `<DRIVE>\<BASE>\rag_storage.tgz`.
   `pull` is a full overwrite, not a merge.
+- `rag_sync.ps1 status` reports whether Drive has really uploaded the snapshot to the cloud (exit 0 UPLOADED, 1 PENDING,
+  2 NOT_FOUND, 3 UNKNOWN; read-only, never touches docker). `push -WaitUpload` waits up to 1 h for it and exits 4 if unconfirmed;
+  a plain `push` only checks once. Needs `drive_upload_status.py` next to `rag_sync.ps1` (new_base copies it).
 - On a Qdrant base the vectors are in a docker volume, not under `rag_storage`. `push` starts
   `qdrant` if needed, waits for `/healthz`, snapshots every collection through Qdrant's own
   snapshot API into `lightrag\data\qdrant_snapshots\`, deletes the server-side copy (or the volume

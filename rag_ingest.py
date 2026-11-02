@@ -263,6 +263,9 @@ async def _quota_stop(pct):
 
 async def _quota_guard():
     global _quota_checked_at
+    # user switch: touch quota_guard.off next to this file to disable the z.ai quota poll; delete it to re-enable.
+    if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "quota_guard.off")):
+        return
     now = time.monotonic()
     if now - _quota_checked_at < _QUOTA_POLL_SEC:
         return
@@ -374,9 +377,10 @@ async def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwar
 # the caption prompt embeds the path, so the same image re-parses to the same key.
 _CAPTION_CACHE_PATH = os.path.join(WORKING_DIR, "vlm_caption_cache.jsonl")
 _caption_cache = None
-# Per-request cap for the live text-caption call. LLM_TIMEOUT (600s x 3 attempts) is far
-# too long for one caption; 429 backoffs sleep between attempts and are not affected.
-_CAPTION_TIMEOUT = int(os.environ.get("CAPTION_TIMEOUT", "180"))
+# Per-request cap for the live text-caption call (env CAPTION_TIMEOUT overrides).
+# 180s was too short: glm-5.3 reasoned 387s on Mortimer table 29.12 (dense oxidation-number
+# grid, 28k reasoning tokens) and timed out on every attempt, 2026-11-02. Worst case 600s x 9 requests.
+_CAPTION_TIMEOUT = int(os.environ.get("CAPTION_TIMEOUT", "600"))
 
 
 def _caption_key(prompt, system_prompt, image_data, model=VISION_MODEL):

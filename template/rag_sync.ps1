@@ -2,15 +2,19 @@
 # Lives in the repo root, next to the lightrag\ folder.
 #   .\rag_sync.ps1 push     # this machine's DB -> Drive
 #   .\rag_sync.ps1 pull     # Drive -> this machine's DB (full overwrite, not a merge)
+#   .\rag_sync.ps1 status   # is the snapshot really uploaded to the cloud? exit 0 UPLOADED, 1 PENDING, 2 NOT_FOUND, 3 UNKNOWN
+#   .\rag_sync.ps1 push -WaitUpload   # also wait (up to 1 h) for the cloud upload; exit 4 = copied to Drive, not confirmed
+# Upload state comes from drive_upload_status.py (next to this script, needs python on PATH); status never touches docker.
 # Drive root: -DriveDir, else $env:__NAME___DRIVE, else "J:\My Drive\RAG" (the ilpin301 account).
 # Snapshot lives in <root>\<project>\rag_storage.tgz - e.g. "...\RAG\__NAME__\rag_storage.tgz".
 # The project subfolder is created by the first push.
 # The LightRAG container is stopped for the duration and restarted only if it was running.
 param(
-    [Parameter(Mandatory, Position = 0)][ValidateSet('push', 'pull')][string]$Action,
+    [Parameter(Mandatory, Position = 0)][ValidateSet('push', 'pull', 'status')][string]$Action,
     [string]$DriveDir = $(if ($env:__NAME___DRIVE) { $env:__NAME___DRIVE } else { 'J:\My Drive\RAG' }),
     [switch]$KeepRunning,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$WaitUpload
 )
 $ErrorActionPreference = 'Stop'
 
@@ -19,6 +23,22 @@ $dataDir = Split-Path $storage
 $project = Split-Path $PSScriptRoot -Leaf
 $destDir = [System.IO.Path]::Combine($DriveDir, $project)
 $archive = [System.IO.Path]::Combine($destDir, 'rag_storage.tgz')
+
+# Cloud-upload check: Drive's own metadata DB says whether the archive is really uploaded.
+function Test-DriveUploaded([int]$wait) {
+    python (Join-Path $PSScriptRoot 'drive_upload_status.py') check $archive --wait $wait | Out-Host
+    $LASTEXITCODE -eq 0
+}
+
+# status runs before any docker/health/ingest logic and needs no container state.
+if ($Action -eq 'status') {
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Write-Warning 'python not found on PATH - cannot check the cloud upload.'
+        exit 3
+    }
+    python (Join-Path $PSScriptRoot 'drive_upload_status.py') check $archive
+    exit $LASTEXITCODE
+}
 
 # --- vector backend ----------------------------------------------------------
 # A nano base is entirely inside rag_storage. A Qdrant base is not: its vectors
@@ -207,4 +227,17 @@ finally {
         "starting $container ..."
         docker start $container | Out-Null
     }
+}
+
+# Upload check after the finally block, so the container is already back up during a long wait.
+if ($Action -eq 'push') {
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Write-Warning 'python not found on PATH - cannot confirm the cloud upload.'
+    }
+    elseif (Test-DriveUploaded $(if ($WaitUpload) { 3600 } else { 0 })) { 'cloud upload confirmed' }
+    elseif ($WaitUpload) {
+        Write-Warning 'copied to Drive folder, cloud upload not confirmed. Snapshot kept; check the Drive tray icon and run: .\rag_sync.ps1 status'
+        exit 4
+    }
+    else { 'upload still in progress - run .\rag_sync.ps1 status later' }
 }
