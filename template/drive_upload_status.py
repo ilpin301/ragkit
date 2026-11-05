@@ -194,9 +194,10 @@ class Snapshot:
                 return "dup", None, "%d items named '%s' in the same folder" % (len(kids), name)
             cur = kids[0][0]
         k = kids[0]
+        # DriveFS 133 stores binary content-entry/Zone.Identifier as TEXT; cast so sqlite3 does not UTF-8 decode them
         props = {key: val for key, val in con.execute(
-            "select key, value from item_properties where item_stable_id=?", (cur,))}
-        ops = con.execute("select proto from operations").fetchall()
+            "select key, case typeof(value) when 'text' then cast(value as blob) else value end from item_properties where item_stable_id=?", (cur,))}
+        ops = con.execute("select cast(proto as blob) from operations").fetchall()
         return "ok", cur, ({"id": k[2], "file_size": k[3], "modified_date": k[4]}, props, ops)
 
 
