@@ -194,10 +194,12 @@ Only when that source is finished, verified clean AND its backup is VERIFIED in 
 Report the queue up front (`3 new: A, B, C — ingesting one at a time, A first`), then one summary
 per source as it lands.
 
-**Back up to Drive between sources.** The per-source cleanup is not done until `rag_sync.ps1 push`
+**Back up to Drive between sources.** The per-source cleanup is not done until `rag_sync.ps1 push -WaitUpload`
 has run AND Step 8 has verified the archive reached the cloud — that backup is what makes the
-just-ingested document survivable, and it is far cheaper to redo one source than a whole queue. A push
-that exits 0 is "pushed locally", not "backed up". Only a VERIFIED Step 8 lets the next source launch.
+just-ingested document survivable, and it is far cheaper to redo one source than a whole queue. A plain
+`rag_sync.ps1 push` exits 1 = PENDING after copying to the local `J:` mount (never read the tool's 'completed' notice as backed up).
+With `-WaitUpload`, exit 0 = `rag_sync.ps1 status` confirmed the cloud upload and exit 4 = copied but NOT confirmed (stop the queue, keep keepawake and GoogleDriveFS on).
+The independent cloud check below is still required. Only a VERIFIED Step 8 lets the next source launch.
 The push runs under keepawake like any other RAG process.
 
 ```powershell
@@ -217,7 +219,8 @@ $gd = Get-Process GoogleDriveFS -ErrorAction SilentlyContinue | Sort-Object Star
 $wait = 300 - ((Get-Date) - $gd.StartTime).TotalSeconds
 if ($wait -gt 0) { Start-Sleep -Seconds ([int][math]::Ceiling($wait)) }
 $pushStart = (Get-Date).ToUniversalTime()      # Step 8 compares the cloud modifiedTime against this
-& (Join-Path $Root 'rag_sync.ps1') push
+# -WaitUpload blocks up to 1 h for the cloud upload (exit 0 confirmed, 4 not confirmed); run it as a background command (foreground tool cap is 10 min)
+& (Join-Path $Root 'rag_sync.ps1') push -WaitUpload
 ```
 
 Why the warm-up: 2026-09-29, Drive cold-started ~1 min before a push; the overwrite (`Copy-Item` onto
@@ -569,7 +572,7 @@ Emit ONE end-of-run summary: files ingested, the five verification numbers (incl
 permanent-loss count), the Step 8 backup numbers (local size, cloud size, cloud modifiedTime),
 anything skipped and why.
 
-Then run `rag_sync.ps1 push` (launching Google Drive first if `J:` is not mounted — see ONE SOURCE
+Then run `rag_sync.ps1 push -WaitUpload` (launching Google Drive first if `J:` is not mounted — see ONE SOURCE
 PER RUN in Step 1), still under keepawake, and go to Step 8. A push that exits 0 only means the file
 reached the local `J:` mount. Only a VERIFIED Step 8 lets you return to Step 2 for the next queued
 source. Cleanup and Drive sync are not deferrable to the end of the queue — each source is fully
@@ -580,7 +583,7 @@ vectors that the graph no longer has, on clean deletes too. The procedure is in 
 
 ## Step 8 — verify the Drive backup reached the cloud (mandatory, gates keepawake release)
 
-`rag_sync.ps1` exit 0 only proves the archive reached the local `J:` mount, not Google's servers
+A plain `rag_sync.ps1 push` exits 1 = PENDING after copying to the local `J:` mount (never read the tool's 'completed' notice as backed up). With `-WaitUpload`, exit 0 = `rag_sync.ps1 status` confirmed the cloud upload and exit 4 = copied but NOT confirmed (stop the queue, keep keepawake and GoogleDriveFS on). The independent cloud check below is still required.
 (~900 MB uploads in the background). keepawake and GoogleDriveFS stay up until the cloud copy matches.
 
 a) Before the push (Step 1 block): `$pushStart = (Get-Date).ToUniversalTime()`.
@@ -657,7 +660,7 @@ Expect `SYSTEM: [PROCESS] ...pwsh.exe`. If it says `None.`, the block is NOT act
 
 **keepawake is stopped ONLY after Step 8 (cloud backup verification) reports VERIFIED.** Not after `EXITCODE=0`, not after Step 6, not after Step 7 cleanup, not after `rag_sync.ps1 push` exits 0. The push itself (`rag_sync.ps1`) is a RAG process and must run under keepawake. On any failure or unverified case keepawake stays ON and the user is told.
 
-Why: 2026-10-22 keepawake was stopped right after verification; `rag_sync.ps1 push` then ran unprotected, the PC had been idle 2.5 h and Windows slept within 3 s (`Kernel-Power 42`, Sleep Reason: System Idle) in the middle of the push. The push resumed after wake and exited 0, yet the cloud copy ~5 min later still showed the previous day's archive.
+Why: 2026-10-22 keepawake was stopped right after verification; `rag_sync.ps1 push` then ran unprotected, the PC had been idle 2.5 h and Windows slept within 3 s (`Kernel-Power 42`, Sleep Reason: System Idle) in the middle of the push. The push resumed after wake and exited 0, yet the cloud copy ~5 min later still showed the previous day's archive. 2026-11-11: a plain push exited 1 (PENDING) while the harness reported 'completed (exit code 0)' from the following command, so `-WaitUpload` is mandatory.
 
 Release (only from Step 8, on VERIFIED):
 
