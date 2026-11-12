@@ -20,6 +20,7 @@
   Why: 2026-09-29 a cold-started Drive (~1 min before the push) made the `Copy-Item` overwrite of
   `rag_storage.tgz` on the streaming mount block >4 min while Drive fetched the old ~1 GB archive; warm
   pushes do not download. Evidence is correlation, cause not proven.
+- **After launching Google Drive, wait 3 min and check that `J:` exists; if not, wait another 3 min and check again.** Check from native PowerShell (`Test-Path 'J:\My Drive'`), never Git Bash. Polling inside each 3-min window and stopping as soon as `J:\My Drive` appears is fine. If `J:` is still absent after the second 3-min window (6 min total), do NOT push or continue: say so in the dialog AND send a Telegram message with `python "$env:USERPROFILE\.claude\skills\il-tg-notify\scripts\tg_send.py" "Google Drive: J: did not appear 6 min after launch - <this base name>"`. This is a standing rule: no user 'tg me' is needed. Then stop the queue and wait for the user.
 - **Start `lightrag\keepawake.ps1` BEFORE any long run and kill it after**, or the box suspends
   mid-run and the job dies. Confirm it registered with `powercfg /requests`, which must show
   `SYSTEM: [PROCESS] ...pwsh.exe`; `None.` means the block is NOT active and the run must not start.

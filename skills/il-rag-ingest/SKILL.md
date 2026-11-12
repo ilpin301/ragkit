@@ -81,7 +81,7 @@ while an ingest is in flight - the launcher owns `stop`/`start` of the lightrag 
 **Start Google Drive now, at the START of the run - not right before the push.** It warms up while
 the ingest runs. If `GoogleDriveFS` is not running, launch it (same lookup as the Step 1 push block:
 newest version folder under `C:\Program Files\Google\Drive File Stream` that contains
-`GoogleDriveFS.exe`, not `Drivers`), then wait for `J:\My Drive` (max 3 min):
+`GoogleDriveFS.exe`, not `Drivers`), then wait for `J:\My Drive` in two 3-min windows (3 min, check `J:`; if absent another 3 min, check again; still absent = stop, tell the user in the dialog AND Telegram via tg_send.py - see the code):
 
 ```powershell
 if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
@@ -90,8 +90,15 @@ if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
             Sort-Object { [version]$_.Name } | Select-Object -Last 1
   Start-Process (Join-Path $gdrive.FullName 'GoogleDriveFS.exe')
 }
-$deadline = (Get-Date).AddMinutes(3)
-while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+foreach ($try in 1..2) {   # two 3-min windows; see CLAUDE.md rule 'After launching Google Drive'
+  $deadline = (Get-Date).AddMinutes(3)
+  while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+  if (Test-Path 'J:\My Drive') { break }
+}
+if (-not (Test-Path 'J:\My Drive')) {
+  python "$env:USERPROFILE\.claude\skills\il-tg-notify\scripts\tg_send.py" "Google Drive: J: did not appear 6 min after launch - $(Split-Path $Root -Leaf)"
+  throw 'J: did not appear in 6 min - tell the user in the dialog, stop the queue'
+}
 ```
 
 
@@ -211,9 +218,15 @@ if (-not (Get-Process GoogleDriveFS -ErrorAction SilentlyContinue)) {
   Start-Process (Join-Path $gdrive.FullName 'GoogleDriveFS.exe')
 }
 # wait for the mount, do not assume it is instant
-$deadline = (Get-Date).AddMinutes(3)
-while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
-if (-not (Test-Path 'J:\My Drive')) { throw 'Google Drive did not mount - stop the queue and report' }
+foreach ($try in 1..2) {   # two 3-min windows; see CLAUDE.md rule 'After launching Google Drive'
+  $deadline = (Get-Date).AddMinutes(3)
+  while (-not (Test-Path 'J:\My Drive') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+  if (Test-Path 'J:\My Drive') { break }
+}
+if (-not (Test-Path 'J:\My Drive')) {
+  python "$env:USERPROFILE\.claude\skills\il-tg-notify\scripts\tg_send.py" "Google Drive: J: did not appear 6 min after launch - $(Split-Path $Root -Leaf)"
+  throw 'J: did not appear in 6 min - tell the user in the dialog, stop the queue'
+}
 # Drive must have been running >= 5 min before the push (see the why below)
 $gd = Get-Process GoogleDriveFS -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1
 $wait = 300 - ((Get-Date) - $gd.StartTime).TotalSeconds
@@ -319,7 +332,7 @@ Confirm every listed path exists before launching — a list file left over from
 usually points at slices that have since been deleted. The launcher refuses an unresolvable entry, but
 catching it here saves a round trip.
 
-Wait with ONE silent one-shot waiter that terminates by itself. Never `tail -f | grep`, never a poller
+Wait with ONE silent one-shot waiter that terminates by itself. The waiter must also end if the launcher process is gone or a hard cap (slices x ~20 min) is reached, so it can never sit silent on a dead run. Never `tail -f | grep`, never a poller
 that emits progress notifications:
 
 ```bash
@@ -612,6 +625,8 @@ background one-shot waiter (`sleep 300` in a `run_in_background` Bash call — f
 then re-check. Silent: no progress messages between checks. Give up after 60 min: report
 "backup NOT confirmed in cloud" with last cloud size/modifiedTime vs local, keep keepawake ON, stop the
 queue, wait for the user.
+
+Push waiter rule: launch the push with `Start-Process -PassThru` and record the PID. The silent waiter ends on whichever comes first: `cloud upload confirmed` in the push log (success), the PID gone (read the log tail to classify), or 70 minutes elapsed. Never wait on a wrapper-written `PUSHEXIT=` line - on 2026-11-11 that line was never written and two waiters hung silent after the pushes had finished.
 
 e) Google Drive MCP not available in the session: do not assume success. Report it, keep keepawake ON,
 ask the user to confirm the Drive tray shows the upload finished, and stop the queue until they confirm.
